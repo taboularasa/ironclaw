@@ -18,6 +18,7 @@ pub mod redaction;
 pub mod schema_validator;
 pub mod wasm;
 
+mod executor;
 mod registry;
 mod tool;
 
@@ -25,6 +26,7 @@ pub use autonomy::{
     AUTONOMOUS_TOOL_DENYLIST, autonomous_allowed_tool_names, autonomous_unavailable_error,
     autonomous_unavailable_message, is_autonomous_tool_denylisted,
 };
+pub use executor::{PtcError, PtcToolResult, ToolExecutor};
 pub use builder::{
     BuildPhase, BuildRequirement, BuildResult, BuildSoftwareTool, BuilderConfig, Language,
     LlmSoftwareBuilder, SoftwareBuilder, SoftwareType, Template, TemplateEngine, TemplateType,
