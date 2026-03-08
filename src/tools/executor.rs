@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 
 use crate::context::JobContext;
 use crate::safety::SafetyLayer;
-use crate::tools::tool::ToolDomain;
 use crate::tools::registry::ToolRegistry;
+use crate::tools::tool::ToolDomain;
 
 /// Maximum allowed nesting depth for tool-invokes-tool chains.
 pub const MAX_NESTING_DEPTH: u32 = 5;
@@ -433,7 +433,10 @@ mod tests {
             _params: serde_json::Value,
             _ctx: &JobContext,
         ) -> Result<ToolOutput, ToolError> {
-            Ok(ToolOutput::text("should not reach here", Duration::from_millis(1)))
+            Ok(ToolOutput::text(
+                "should not reach here",
+                Duration::from_millis(1),
+            ))
         }
         fn domain(&self) -> ToolDomain {
             ToolDomain::Container
