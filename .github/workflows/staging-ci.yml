@@ -38,6 +38,7 @@ jobs:
         with:
           ref: staging
           fetch-depth: 0
+          fetch-tags: true
 
       - name: Check for changes since last tested
         id: check
@@ -368,11 +369,14 @@ jobs:
                 echo "*Auto-created by staging-ci Claude Code review*"
               } > /tmp/issue-body.md
 
-              gh issue create \
+              if gh issue create \
                 --title "[${SEVERITY}] ${TITLE}" \
                 --body-file /tmp/issue-body.md \
-                --label "${LABELS}" || echo "::warning::Failed to create issue for ${SEVERITY} finding"
-              ISSUES_CREATED=$((ISSUES_CREATED + 1))
+                --label "${LABELS}"; then
+                ISSUES_CREATED=$((ISSUES_CREATED + 1))
+              else
+                echo "::warning::Failed to create issue for ${SEVERITY} finding"
+              fi
             fi
           done < <(echo "$BODY" | grep -oE '\[(CRITICAL|HIGH|MEDIUM|LOW):[0-9]+\].*')
 
