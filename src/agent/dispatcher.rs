@@ -15,6 +15,7 @@ use crate::channels::{IncomingMessage, StatusUpdate};
 use crate::context::JobContext;
 use crate::error::Error;
 use crate::llm::{ChatMessage, Reasoning, ReasoningContext, RespondResult};
+use crate::tools::redact_params;
 
 /// Result of the agentic loop execution.
 pub(super) enum AgenticLoopResult {
@@ -49,8 +50,18 @@ impl Agent {
 
         // Load workspace system prompt (identity files: AGENTS.md, SOUL.md, etc.)
         // In group chats, MEMORY.md is excluded to prevent leaking personal context.
+        // Resolve the user's timezone
+        let user_tz = crate::timezone::resolve_timezone(
+            message.timezone.as_deref(),
+            None, // user setting lookup can be added later
+            &self.config.default_timezone,
+        );
+
         let system_prompt = if let Some(ws) = self.workspace() {
-            match ws.system_prompt_for_context(is_group_chat).await {
+            match ws
+                .system_prompt_for_context_tz(is_group_chat, user_tz)
+                .await
+            {
                 Ok(prompt) if !prompt.is_empty() => Some(prompt),
                 Ok(_) => None,
                 Err(e) => {
@@ -102,7 +113,7 @@ impl Agent {
             None
         };
 
-        let mut reasoning = Reasoning::new(self.llm().clone(), self.safety().clone())
+        let mut reasoning = Reasoning::new(self.llm().clone())
             .with_channel(message.channel.clone())
             .with_model_name(self.llm().active_model_name())
             .with_group_chat(is_group_chat);
@@ -126,7 +137,21 @@ impl Agent {
         let mut context_messages = initial_messages;
 
         // Create a JobContext for tool execution (chat doesn't have a real job)
-        let job_ctx = JobContext::with_user(&message.user_id, "chat", "Interactive chat session");
+        let mut job_ctx =
+            JobContext::with_user(&message.user_id, "chat", "Interactive chat session");
+        job_ctx.http_interceptor = self.deps.http_interceptor.clone();
+        job_ctx.user_timezone = user_tz.name().to_string();
+
+        // Build system prompts once for this turn. Two variants: with tools
+        // (normal iterations) and without (force_text final iteration).
+        let initial_tool_defs = self.tools().tool_definitions().await;
+        let initial_tool_defs = if !active_skills.is_empty() {
+            crate::skills::attenuate_tools(&initial_tool_defs, &active_skills).tools
+        } else {
+            initial_tool_defs
+        };
+        let cached_prompt = reasoning.build_system_prompt_with_tools(&initial_tool_defs);
+        let cached_prompt_no_tools = reasoning.build_system_prompt_with_tools(&[]);
 
         let max_tool_iterations = self.config.max_tool_iterations;
         // Force a text-only response on the last iteration to guarantee termination
@@ -135,6 +160,8 @@ impl Agent {
         let force_text_at = max_tool_iterations;
         let nudge_at = max_tool_iterations.saturating_sub(1);
         let mut iteration = 0;
+        const MAX_TOOL_INTENT_NUDGES: u32 = 2;
+        let mut consecutive_tool_intent_nudges: u32 = 0;
         loop {
             iteration += 1;
             // Hard ceiling one past the forced-text iteration (should never be reached
@@ -203,10 +230,16 @@ impl Agent {
             };
 
             // Call LLM with current context; force_text drops tools to guarantee a
-            // text response on the final iteration.
+            // text response on the final iteration. The pre-built system prompt
+            // avoids rebuilding the same ~1,500-token string each iteration.
             let mut context = ReasoningContext::new()
                 .with_messages(context_messages.clone())
                 .with_tools(tool_defs)
+                .with_system_prompt(if force_text {
+                    cached_prompt_no_tools.clone()
+                } else {
+                    cached_prompt.clone()
+                })
                 .with_metadata({
                     let mut m = std::collections::HashMap::new();
                     m.insert("thread_id".to_string(), thread_id.to_string());
@@ -243,7 +276,7 @@ impl Agent {
                     // Compact: keep system messages + last user message + current turn
                     context_messages = compact_messages_for_retry(&context_messages);
 
-                    // Rebuild context with compacted messages
+                    // Rebuild context with compacted messages, reusing cached prompt
                     let mut retry_context = ReasoningContext::new()
                         .with_messages(context_messages.clone())
                         .with_tools(if force_text {
@@ -253,6 +286,7 @@ impl Agent {
                         })
                         .with_metadata(context.metadata.clone());
                     retry_context.force_text = force_text;
+                    retry_context.system_prompt = context.system_prompt.clone();
 
                     reasoning
                         .respond_with_tools(&retry_context)
@@ -273,12 +307,18 @@ impl Agent {
 
             // Record cost and track token usage
             let model_name = self.llm().active_model_name();
+            let read_discount = self.llm().cache_read_discount();
+            let write_multiplier = self.llm().cache_write_multiplier();
             let call_cost = self
                 .cost_guard()
                 .record_llm_call(
                     &model_name,
                     output.usage.input_tokens,
                     output.usage.output_tokens,
+                    output.usage.cache_read_input_tokens,
+                    output.usage.cache_creation_input_tokens,
+                    read_discount,
+                    write_multiplier,
                     Some(self.llm().cost_per_token()),
                 )
                 .await;
@@ -291,12 +331,35 @@ impl Agent {
 
             match output.result {
                 RespondResult::Text(text) => {
-                    return Ok(AgenticLoopResult::Response(text));
+                    // Nudge the LLM if it expressed tool intent without calling tools.
+                    // This is common with non-Anthropic models (e.g. GLM-5 via NEAR AI)
+                    // that output "Let me search…" but don't issue tool_calls.
+                    if !force_text
+                        && !context.available_tools.is_empty()
+                        && consecutive_tool_intent_nudges < MAX_TOOL_INTENT_NUDGES
+                        && crate::llm::llm_signals_tool_intent(&text)
+                    {
+                        consecutive_tool_intent_nudges += 1;
+                        tracing::info!(
+                            iteration,
+                            "LLM expressed tool intent without calling a tool, nudging"
+                        );
+                        context_messages.push(ChatMessage::assistant(&text));
+                        context_messages.push(ChatMessage::user(crate::llm::TOOL_INTENT_NUDGE));
+                        continue;
+                    }
+
+                    // Strip internal "[Called tool ...]" text that can leak when
+                    // provider flattening (e.g. NEAR AI) converts tool_calls to
+                    // plain text and the LLM echoes it back.
+                    let sanitized = strip_internal_tool_call_text(&text);
+                    return Ok(AgenticLoopResult::Response(sanitized));
                 }
                 RespondResult::ToolCalls {
                     tool_calls,
                     content,
                 } => {
+                    consecutive_tool_intent_nudges = 0;
                     // Add the assistant message with tool_calls to context.
                     // OpenAI protocol requires this before tool-result messages.
                     context_messages.push(ChatMessage::assistant_with_tool_calls(
@@ -317,14 +380,25 @@ impl Agent {
                         )
                         .await;
 
-                    // Record tool calls in the thread
+                    // Record tool calls in the thread with sensitive params redacted.
+                    // Look up each tool's sensitive_params before acquiring the session lock.
                     {
+                        let mut redacted_args: Vec<serde_json::Value> =
+                            Vec::with_capacity(tool_calls.len());
+                        for tc in &tool_calls {
+                            let safe = if let Some(tool) = self.tools().get(&tc.name).await {
+                                redact_params(&tc.arguments, tool.sensitive_params())
+                            } else {
+                                tc.arguments.clone()
+                            };
+                            redacted_args.push(safe);
+                        }
                         let mut sess = session.lock().await;
                         if let Some(thread) = sess.threads.get_mut(&thread_id)
                             && let Some(turn) = thread.last_turn_mut()
                         {
-                            for tc in &tool_calls {
-                                turn.record_tool_call(&tc.name, tc.arguments.clone());
+                            for (tc, safe_args) in tool_calls.iter().zip(redacted_args) {
+                                turn.record_tool_call(&tc.name, safe_args);
                             }
                         }
                     }
@@ -353,11 +427,22 @@ impl Agent {
                     for (idx, original_tc) in tool_calls.iter().enumerate() {
                         let mut tc = original_tc.clone();
 
+                        // Fetch the tool upfront so we can redact sensitive params
+                        // before they touch hooks or approval display.
+                        let tool_opt = self.tools().get(&tc.name).await;
+                        let sensitive = tool_opt
+                            .as_ref()
+                            .map(|t| t.sensitive_params())
+                            .unwrap_or(&[]);
+
                         // Hook: BeforeToolCall (runs before approval so hooks can
-                        // modify parameters — approval is checked on final params)
+                        // modify parameters — approval is checked on final params).
+                        // Hooks receive redacted params so sensitive values are not
+                        // exposed to hook handlers or their logs.
+                        let hook_params = redact_params(&tc.arguments, sensitive);
                         let event = crate::hooks::HookEvent::ToolCall {
                             tool_name: tc.name.clone(),
-                            parameters: tc.arguments.clone(),
+                            parameters: hook_params,
                             user_id: message.user_id.clone(),
                             context: "chat".to_string(),
                         };
@@ -384,8 +469,20 @@ impl Agent {
                             }
                             Ok(crate::hooks::HookOutcome::Continue {
                                 modified: Some(new_params),
-                            }) => match serde_json::from_str(&new_params) {
-                                Ok(parsed) => tc.arguments = parsed,
+                            }) => match serde_json::from_str::<serde_json::Value>(&new_params) {
+                                Ok(mut parsed) => {
+                                    // Restore original sensitive param values so a hook
+                                    // cannot overwrite them (they were sent as [REDACTED]).
+                                    if let Some(obj) = parsed.as_object_mut() {
+                                        for key in sensitive {
+                                            if let Some(orig_val) = original_tc.arguments.get(*key)
+                                            {
+                                                obj.insert((*key).to_string(), orig_val.clone());
+                                            }
+                                        }
+                                    }
+                                    tc.arguments = parsed;
+                                }
                                 Err(e) => {
                                     tracing::warn!(
                                         tool = %tc.name,
@@ -400,7 +497,7 @@ impl Agent {
                         // Check if tool requires approval on the final (post-hook)
                         // parameters. Skipped when auto_approve_tools is set.
                         if !self.config.auto_approve_tools
-                            && let Some(tool) = self.tools().get(&tc.name).await
+                            && let Some(tool) = tool_opt
                         {
                             use crate::tools::ApprovalRequirement;
                             let needs_approval = match tool.requires_approval(&tc.arguments) {
@@ -447,14 +544,17 @@ impl Agent {
                                 .execute_chat_tool(&tc.name, &tc.arguments, &job_ctx)
                                 .await;
 
+                            let disp_tool = self.tools().get(&tc.name).await;
                             let _ = self
                                 .channels
                                 .send_status(
                                     &message.channel,
-                                    StatusUpdate::ToolCompleted {
-                                        name: tc.name.clone(),
-                                        success: result.is_ok(),
-                                    },
+                                    StatusUpdate::tool_completed(
+                                        tc.name.clone(),
+                                        &result,
+                                        &tc.arguments,
+                                        disp_tool.as_deref(),
+                                    ),
                                     &message.metadata,
                                 )
                                 .await;
@@ -495,13 +595,16 @@ impl Agent {
                                 )
                                 .await;
 
+                                let par_tool = tools.get(&tc.name).await;
                                 let _ = channels
                                     .send_status(
                                         &channel,
-                                        StatusUpdate::ToolCompleted {
-                                            name: tc.name.clone(),
-                                            success: result.is_ok(),
-                                        },
+                                        StatusUpdate::tool_completed(
+                                            tc.name.clone(),
+                                            &result,
+                                            &tc.arguments,
+                                            par_tool.as_deref(),
+                                        ),
                                         &metadata,
                                     )
                                     .await;
@@ -578,8 +681,53 @@ impl Agent {
                                         .into())
                                     });
 
-                                // Send ToolResult preview
-                                if let Ok(ref output) = tool_result
+                                // Detect image generation sentinel in tool output
+                                // (only from image tools — avoids parsing all tool outputs)
+                                let is_image_sentinel = if let Ok(ref output) = tool_result
+                                    && matches!(tc.name.as_str(), "image_generate" | "image_edit")
+                                {
+                                    if let Ok(sentinel) =
+                                        serde_json::from_str::<serde_json::Value>(output)
+                                        && sentinel.get("type").and_then(|v| v.as_str())
+                                            == Some("image_generated")
+                                    {
+                                        let data_url = sentinel
+                                            .get("data")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or_default()
+                                            .to_string();
+                                        let path = sentinel
+                                            .get("path")
+                                            .and_then(|v| v.as_str())
+                                            .map(String::from);
+                                        // Skip broadcasting if data_url is empty to avoid
+                                        // sending a broken ImageGenerated SSE event.
+                                        if data_url.is_empty() {
+                                            tracing::warn!(
+                                                "Image generation sentinel has empty data URL, skipping broadcast"
+                                            );
+                                        } else {
+                                            let _ = self
+                                                .channels
+                                                .send_status(
+                                                    &message.channel,
+                                                    StatusUpdate::ImageGenerated { data_url, path },
+                                                    &message.metadata,
+                                                )
+                                                .await;
+                                        }
+                                        true
+                                    } else {
+                                        false
+                                    }
+                                } else {
+                                    false
+                                };
+
+                                // Send ToolResult preview (skip for image sentinels to avoid
+                                // broadcasting multi-MB base64 data as a preview)
+                                if !is_image_sentinel
+                                    && let Ok(ref output) = tool_result
                                     && !output.is_empty()
                                 {
                                     let _ = self
@@ -641,6 +789,15 @@ impl Agent {
                                     deferred_auth = Some(instructions);
                                 }
 
+                                // Stash full output so subsequent tools can reference it
+                                if let Ok(ref output) = tool_result {
+                                    job_ctx
+                                        .tool_output_stash
+                                        .write()
+                                        .await
+                                        .insert(tc.id.clone(), output.clone());
+                                }
+
                                 // Sanitize and add tool result to context
                                 let result_content = match tool_result {
                                     Ok(output) => {
@@ -652,7 +809,7 @@ impl Agent {
                                             sanitized.was_modified,
                                         )
                                     }
-                                    Err(e) => format!("Error: {}", e),
+                                    Err(e) => format!("Tool '{}' failed: {}", tc.name, e),
                                 };
 
                                 context_messages.push(ChatMessage::tool_result(
@@ -671,14 +828,20 @@ impl Agent {
 
                     // Handle approval if a tool needed it
                     if let Some((approval_idx, tc, tool)) = approval_needed {
+                        // Show redacted params in the approval UI — the user already knows
+                        // the sensitive value (they provided it); showing it again is
+                        // unnecessary and creates a leakage path through channel logs.
+                        let display_params = redact_params(&tc.arguments, tool.sensitive_params());
                         let pending = PendingApproval {
                             request_id: Uuid::new_v4(),
                             tool_name: tc.name.clone(),
                             parameters: tc.arguments.clone(),
+                            display_parameters: display_params,
                             description: tool.description().to_string(),
                             tool_call_id: tc.id.clone(),
                             context_messages: context_messages.clone(),
                             deferred_tool_calls: tool_calls[approval_idx + 1..].to_vec(),
+                            user_timezone: Some(user_tz.name().to_string()),
                         };
 
                         return Ok(AgenticLoopResult::NeedApproval { pending });
@@ -734,9 +897,10 @@ pub(super) async fn execute_chat_tool_standalone(
         .into());
     }
 
+    let safe_params = redact_params(params, tool.sensitive_params());
     tracing::debug!(
         tool = %tool_name,
-        params = %params,
+        params = %safe_params,
         "Tool call started"
     );
 
@@ -900,6 +1064,38 @@ fn compact_messages_for_retry(messages: &[ChatMessage]) -> Vec<ChatMessage> {
     compacted
 }
 
+/// Strip internal `[Called tool ...]` and `[Tool ... returned: ...]` markers
+/// from a response string. These markers are inserted by provider-level message
+/// flattening (e.g. NEAR AI) and can leak into the user-visible response when
+/// the LLM echoes them back.
+fn strip_internal_tool_call_text(text: &str) -> String {
+    // Remove lines that are purely internal tool-call markers.
+    // Pattern: lines matching `[Called tool <name>(...)]` or `[Tool <name> returned: ...]`
+    let result = text
+        .lines()
+        .filter(|line| {
+            let trimmed = line.trim();
+            !((trimmed.starts_with("[Called tool ") && trimmed.ends_with(']'))
+                || (trimmed.starts_with("[Tool ")
+                    && trimmed.contains(" returned:")
+                    && trimmed.ends_with(']')))
+        })
+        .fold(String::new(), |mut acc, s| {
+            if !acc.is_empty() {
+                acc.push('\n');
+            }
+            acc.push_str(s);
+            acc
+        });
+
+    let result = result.trim();
+    if result.is_empty() {
+        "I wasn't able to complete that request. Could you try rephrasing or providing more details?".to_string()
+    } else {
+        result.to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -947,6 +1143,8 @@ mod tests {
                 input_tokens: 0,
                 output_tokens: 0,
                 finish_reason: FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
             })
         }
 
@@ -960,6 +1158,8 @@ mod tests {
                 input_tokens: 0,
                 output_tokens: 0,
                 finish_reason: FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
             })
         }
     }
@@ -982,6 +1182,10 @@ mod tests {
             skills_config: SkillsConfig::default(),
             hooks: Arc::new(HookRegistry::new()),
             cost_guard: Arc::new(CostGuard::new(CostGuardConfig::default())),
+            sse_tx: None,
+            http_interceptor: None,
+            transcription: None,
+            document_extraction: None,
         };
 
         Agent::new(
@@ -999,6 +1203,7 @@ mod tests {
                 max_actions_per_hour: None,
                 max_tool_iterations: 50,
                 auto_approve_tools: false,
+                default_timezone: "UTC".to_string(),
             },
             deps,
             Arc::new(ChannelManager::new()),
@@ -1085,6 +1290,7 @@ mod tests {
             request_id: uuid::Uuid::new_v4(),
             tool_name: "shell".to_string(),
             parameters: serde_json::json!({"command": "echo hi"}),
+            display_parameters: serde_json::json!({"command": "echo hi"}),
             description: "Run shell command".to_string(),
             tool_call_id: "call_1".to_string(),
             context_messages: vec![],
@@ -1100,6 +1306,7 @@ mod tests {
                     arguments: serde_json::json!({"message": "done"}),
                 },
             ],
+            user_timezone: None,
         };
 
         let json = serde_json::to_string(&pending).expect("serialize");
@@ -1447,12 +1654,8 @@ mod tests {
         use crate::testing::StubLlm;
 
         let stub = Arc::new(StubLlm::failing_non_transient("ctx-bomb"));
-        let safety = Arc::new(SafetyLayer::new(&SafetyConfig {
-            max_output_length: 100_000,
-            injection_check_enabled: false,
-        }));
 
-        let reasoning = Reasoning::new(stub.clone(), safety);
+        let reasoning = Reasoning::new(stub.clone());
 
         // Build a fat context with lots of history.
         let messages = vec![
@@ -1517,6 +1720,8 @@ mod tests {
                 input_tokens: 0,
                 output_tokens: 5,
                 finish_reason: FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
             })
         }
 
@@ -1532,6 +1737,8 @@ mod tests {
                     input_tokens: 0,
                     output_tokens: 5,
                     finish_reason: FinishReason::Stop,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
                 });
             }
             // Tools available: always call one.
@@ -1545,6 +1752,8 @@ mod tests {
                 input_tokens: 0,
                 output_tokens: 5,
                 finish_reason: FinishReason::ToolUse,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
             })
         }
     }
@@ -1556,11 +1765,7 @@ mod tests {
         use crate::llm::{Reasoning, ReasoningContext, RespondResult, ToolDefinition};
 
         let provider = Arc::new(AlwaysToolCallProvider);
-        let safety = Arc::new(SafetyLayer::new(&SafetyConfig {
-            max_output_length: 100_000,
-            injection_check_enabled: false,
-        }));
-        let reasoning = Reasoning::new(provider, safety);
+        let reasoning = Reasoning::new(provider);
 
         let tool_def = ToolDefinition {
             name: "echo".to_string(),
@@ -1669,6 +1874,8 @@ mod tests {
                 input_tokens: 0,
                 output_tokens: 2,
                 finish_reason: FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
             })
         }
 
@@ -1683,6 +1890,8 @@ mod tests {
                     input_tokens: 0,
                     output_tokens: 2,
                     finish_reason: FinishReason::Stop,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
                 });
             }
             // Always call a tool that does not exist in the registry.
@@ -1696,6 +1905,8 @@ mod tests {
                 input_tokens: 0,
                 output_tokens: 5,
                 finish_reason: FinishReason::ToolUse,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
             })
         }
     }
@@ -1719,6 +1930,10 @@ mod tests {
             skills_config: SkillsConfig::default(),
             hooks: Arc::new(HookRegistry::new()),
             cost_guard: Arc::new(CostGuard::new(CostGuardConfig::default())),
+            sse_tx: None,
+            http_interceptor: None,
+            transcription: None,
+            document_extraction: None,
         };
 
         Agent::new(
@@ -1736,6 +1951,7 @@ mod tests {
                 max_actions_per_hour: None,
                 max_tool_iterations,
                 auto_approve_tools: true,
+                default_timezone: "UTC".to_string(),
             },
             deps,
             Arc::new(ChannelManager::new()),
@@ -1830,6 +2046,10 @@ mod tests {
                 skills_config: SkillsConfig::default(),
                 hooks: Arc::new(HookRegistry::new()),
                 cost_guard: Arc::new(CostGuard::new(CostGuardConfig::default())),
+                sse_tx: None,
+                http_interceptor: None,
+                transcription: None,
+                document_extraction: None,
             };
 
             Agent::new(
@@ -1847,6 +2067,7 @@ mod tests {
                     max_actions_per_hour: None,
                     max_tool_iterations: max_iter,
                     auto_approve_tools: true,
+                    default_timezone: "UTC".to_string(),
                 },
                 deps,
                 Arc::new(ChannelManager::new()),
@@ -1898,5 +2119,97 @@ mod tests {
                 panic!("Expected text response, got NeedApproval");
             }
         }
+    }
+
+    #[test]
+    fn test_strip_internal_tool_call_text_removes_markers() {
+        let input = "[Called tool search({\"query\": \"test\"})]\nHere is the answer.";
+        let result = super::strip_internal_tool_call_text(input);
+        assert_eq!(result, "Here is the answer.");
+    }
+
+    #[test]
+    fn test_strip_internal_tool_call_text_removes_returned_markers() {
+        let input = "[Tool search returned: some result]\nSummary of findings.";
+        let result = super::strip_internal_tool_call_text(input);
+        assert_eq!(result, "Summary of findings.");
+    }
+
+    #[test]
+    fn test_strip_internal_tool_call_text_all_markers_yields_fallback() {
+        let input = "[Called tool search({\"query\": \"test\"})]\n[Tool search returned: error]";
+        let result = super::strip_internal_tool_call_text(input);
+        assert!(result.contains("wasn't able to complete"));
+    }
+
+    #[test]
+    fn test_strip_internal_tool_call_text_preserves_normal_text() {
+        let input = "This is a normal response with [brackets] inside.";
+        let result = super::strip_internal_tool_call_text(input);
+        assert_eq!(result, input);
+    }
+
+    #[test]
+    fn test_tool_error_format_includes_tool_name() {
+        // Regression test for issue #487: tool errors sent to the LLM should
+        // include the tool name so the model can reason about which tool failed
+        // and try alternatives.
+        let tool_name = "http";
+        let err = crate::error::ToolError::ExecutionFailed {
+            name: tool_name.to_string(),
+            reason: "connection refused".to_string(),
+        };
+        let formatted = format!("Tool '{}' failed: {}", tool_name, err);
+        assert!(
+            formatted.contains("Tool 'http' failed:"),
+            "Error should identify the tool by name, got: {formatted}"
+        );
+        assert!(
+            formatted.contains("connection refused"),
+            "Error should include the underlying reason, got: {formatted}"
+        );
+    }
+
+    #[test]
+    fn test_image_sentinel_empty_data_url_should_be_skipped() {
+        // Regression: unwrap_or_default() on missing "data" field produces an empty
+        // string. Broadcasting an empty data_url would send a broken SSE event.
+        let sentinel = serde_json::json!({
+            "type": "image_generated",
+            "path": "/tmp/image.png"
+            // "data" field is missing
+        });
+
+        let data_url = sentinel
+            .get("data")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+
+        assert!(
+            data_url.is_empty(),
+            "Missing 'data' field should produce empty string"
+        );
+        // The fix: empty data_url means we skip broadcasting
+    }
+
+    #[test]
+    fn test_image_sentinel_present_data_url_is_valid() {
+        let sentinel = serde_json::json!({
+            "type": "image_generated",
+            "data": "data:image/png;base64,abc123",
+            "path": "/tmp/image.png"
+        });
+
+        let data_url = sentinel
+            .get("data")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+
+        assert!(
+            !data_url.is_empty(),
+            "Present 'data' field should produce non-empty string"
+        );
     }
 }

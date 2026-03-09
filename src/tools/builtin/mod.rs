@@ -9,15 +9,17 @@ mod json;
 mod memory;
 mod message;
 pub mod path_utils;
+mod restart;
 pub mod routine;
+pub mod secrets_tools;
 pub(crate) mod shell;
 pub mod skill_tools;
 mod time;
-mod web_fetch;
 
 pub use echo::EchoTool;
 pub use extension_tools::{
-    ToolActivateTool, ToolAuthTool, ToolInstallTool, ToolListTool, ToolRemoveTool, ToolSearchTool,
+    ExtensionInfoTool, ToolActivateTool, ToolAuthTool, ToolInstallTool, ToolListTool,
+    ToolRemoveTool, ToolSearchTool, ToolUpgradeTool,
 };
 pub use file::{ApplyPatchTool, ListDirTool, ReadFileTool, WriteFileTool};
 pub use http::HttpTool;
@@ -28,14 +30,31 @@ pub use job::{
 pub use json::JsonTool;
 pub use memory::{MemoryReadTool, MemorySearchTool, MemoryTreeTool, MemoryWriteTool};
 pub use message::MessageTool;
+pub use restart::RestartTool;
 pub use routine::{
-    RoutineCreateTool, RoutineDeleteTool, RoutineHistoryTool, RoutineListTool, RoutineUpdateTool,
+    RoutineCreateTool, RoutineDeleteTool, RoutineFireTool, RoutineHistoryTool, RoutineListTool,
+    RoutineUpdateTool,
 };
+pub use secrets_tools::{SecretDeleteTool, SecretListTool};
 pub use shell::ShellTool;
 pub use skill_tools::{SkillInstallTool, SkillListTool, SkillRemoveTool, SkillSearchTool};
 pub use time::TimeTool;
-pub use web_fetch::WebFetchTool;
-
 mod html_converter;
+pub mod image_analyze;
+pub mod image_edit;
+pub mod image_gen;
 
 pub use html_converter::convert_html_to_markdown;
+pub use image_analyze::ImageAnalyzeTool;
+pub use image_edit::ImageEditTool;
+pub use image_gen::ImageGenerateTool;
+
+/// Detect image media type from file extension via `mime_guess`.
+/// Falls back to `image/jpeg` for unrecognized or non-image extensions.
+pub(crate) fn media_type_from_path(path: &str) -> String {
+    mime_guess::from_path(path)
+        .first_raw()
+        .filter(|m| m.starts_with("image/"))
+        .unwrap_or("image/jpeg")
+        .to_string()
+}

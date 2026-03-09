@@ -148,8 +148,12 @@ pub struct PendingApproval {
     pub request_id: Uuid,
     /// Tool name requiring approval.
     pub tool_name: String,
-    /// Tool parameters.
+    /// Tool parameters (original values, used for execution).
     pub parameters: serde_json::Value,
+    /// Redacted tool parameters (sensitive values replaced with `[REDACTED]`).
+    /// Used for display in approval UI, logs, and SSE broadcasts.
+    #[serde(default)]
+    pub display_parameters: serde_json::Value,
     /// Description of what the tool will do.
     pub description: String,
     /// Tool call ID from LLM (for proper context continuation).
@@ -160,6 +164,10 @@ pub struct PendingApproval {
     /// executed yet when approval was requested.
     #[serde(default)]
     pub deferred_tool_calls: Vec<ToolCall>,
+    /// User timezone at the time the approval was requested, so it persists
+    /// through the approval flow even if the approval message lacks timezone.
+    #[serde(default)]
+    pub user_timezone: Option<String>,
 }
 
 /// A conversation thread within a session.
@@ -316,7 +324,14 @@ impl Thread {
     pub fn messages(&self) -> Vec<ChatMessage> {
         let mut messages = Vec::new();
         for turn in &self.turns {
-            messages.push(ChatMessage::user(&turn.user_input));
+            if turn.image_content_parts.is_empty() {
+                messages.push(ChatMessage::user(&turn.user_input));
+            } else {
+                messages.push(ChatMessage::user_with_parts(
+                    &turn.user_input,
+                    turn.image_content_parts.clone(),
+                ));
+            }
             if let Some(ref response) = turn.response {
                 messages.push(ChatMessage::assistant(response));
             }
@@ -403,6 +418,11 @@ pub struct Turn {
     pub completed_at: Option<DateTime<Utc>>,
     /// Error message (if failed).
     pub error: Option<String>,
+    /// Transient image content parts for multimodal LLM input.
+    /// Not serialized — images are only needed for the current LLM call.
+    /// The text description in `user_input` persists for compaction/context.
+    #[serde(skip)]
+    pub image_content_parts: Vec<crate::llm::ContentPart>,
 }
 
 impl Turn {
@@ -417,6 +437,7 @@ impl Turn {
             started_at: Utc::now(),
             completed_at: None,
             error: None,
+            image_content_parts: Vec::new(),
         }
     }
 
@@ -425,6 +446,8 @@ impl Turn {
         self.response = Some(response.into());
         self.state = TurnState::Completed;
         self.completed_at = Some(Utc::now());
+        // Free image data — only needed for the initial LLM call, not subsequent turns
+        self.image_content_parts.clear();
     }
 
     /// Fail this turn.
@@ -432,12 +455,14 @@ impl Turn {
         self.error = Some(error.into());
         self.state = TurnState::Failed;
         self.completed_at = Some(Utc::now());
+        self.image_content_parts.clear();
     }
 
     /// Interrupt this turn.
     pub fn interrupt(&mut self) {
         self.state = TurnState::Interrupted;
         self.completed_at = Some(Utc::now());
+        self.image_content_parts.clear();
     }
 
     /// Record a tool call.
@@ -950,10 +975,12 @@ mod tests {
             request_id: Uuid::new_v4(),
             tool_name: "shell".to_string(),
             parameters: serde_json::json!({"command": "rm -rf /"}),
+            display_parameters: serde_json::json!({"command": "rm -rf /"}),
             description: "dangerous command".to_string(),
             tool_call_id: "call_123".to_string(),
             context_messages: vec![ChatMessage::user("do it")],
             deferred_tool_calls: vec![],
+            user_timezone: None,
         };
 
         thread.await_approval(approval);
@@ -974,10 +1001,12 @@ mod tests {
             request_id: Uuid::new_v4(),
             tool_name: "http".to_string(),
             parameters: serde_json::json!({}),
+            display_parameters: serde_json::json!({}),
             description: "test".to_string(),
             tool_call_id: "call_456".to_string(),
             context_messages: vec![],
             deferred_tool_calls: vec![],
+            user_timezone: None,
         };
 
         thread.await_approval(approval);
