@@ -261,7 +261,7 @@ jobs:
           fi
 
           echo "Polling for Claude Code Review job on PR #${PR_NUMBER} (SHA: ${PR_SHA})..."
-          TIMEOUT=1200  # 20 minutes
+          TIMEOUT=1800  # 30 minutes
           ELAPSED=0
           INTERVAL=30
 
@@ -375,8 +375,8 @@ jobs:
         env:
           PR_NUMBER: ${{ needs.create-promotion-pr.outputs.pr_number }}
           SKIP_GATE: ${{ inputs.skip_claude_gate }}
+          HAS_BLOCKING: ${{ steps.process-findings.outputs.has_blocking }}
         run: |
-          HAS_BLOCKING="${{ steps.process-findings.outputs.has_blocking }}"
           SKIP_INPUT="$SKIP_GATE"
 
           if [ "$HAS_BLOCKING" = "true" ]; then
