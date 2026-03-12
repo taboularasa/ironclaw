@@ -13,7 +13,7 @@ Commands:
   tool        Manage WASM tools
   registry    Browse/install extensions
   channels    Manage channels
-  cron        Manage cron routines
+  routines    Manage routines
   mcp         Manage MCP servers
   memory      Manage workspace memory
   pairing     Manage DM pairing

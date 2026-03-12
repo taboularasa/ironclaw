@@ -7,7 +7,7 @@
 //! - Managing WASM tools (`tool install`, `tool list`, `tool remove`)
 //! - Managing MCP servers (`mcp add`, `mcp auth`, `mcp list`, `mcp test`)
 //! - Querying workspace memory (`memory search`, `memory read`, `memory write`)
-//! - Managing scheduled routines (`cron list`, `cron create`, `cron edit`, ...)
+//! - Managing routines (`routines list`, `routines create`, `routines edit`, ...)
 //! - Managing OS service (`service install`, `service start`, `service stop`)
 //! - Listing configured channels (`channels list`)
 //! - Active health diagnostics (`doctor`)
@@ -16,7 +16,7 @@
 mod channels;
 mod completion;
 mod config;
-mod cron;
+mod routines;
 mod doctor;
 #[cfg(feature = "import")]
 pub mod import;
@@ -33,7 +33,7 @@ mod tool;
 pub use channels::{ChannelsCommand, run_channels_command};
 pub use completion::Completion;
 pub use config::{ConfigCommand, run_config_command};
-pub use cron::{CronCommand, run_cron_command};
+pub use routines::{RoutinesCommand, run_routines_command};
 pub use doctor::run_doctor_command;
 #[cfg(feature = "import")]
 pub use import::{ImportCommand, run_import_command};
@@ -150,13 +150,14 @@ pub enum Command {
     )]
     Channels(ChannelsCommand),
 
-    /// Manage scheduled routines (cron jobs)
+    /// Manage routines (scheduled, event-driven, webhook, manual)
     #[command(
         subcommand,
-        about = "Manage cron routines",
-        long_about = "List, create, edit, enable/disable, delete, and view history of cron routines.\nExamples:\n  ironclaw cron list\n  ironclaw cron create --name daily-digest --schedule '0 0 9 * * *' --prompt 'Summarize today'"
+        alias = "cron",
+        about = "Manage routines",
+        long_about = "List, create, edit, enable/disable, delete, and view history of routines.\nExamples:\n  ironclaw routines list\n  ironclaw routines create --name daily-digest --schedule '0 0 9 * * *' --prompt 'Summarize today'"
     )]
-    Cron(CronCommand),
+    Routines(RoutinesCommand),
 
     /// Manage MCP servers (hosted tool providers)
     #[command(
@@ -292,9 +293,9 @@ pub async fn init_secrets_store()
     Ok(crate::db::create_secrets_store(&config.database, crypto).await?)
 }
 
-/// Run the Cron CLI subcommand.
-pub async fn run_cron_cli(
-    cron_cmd: &CronCommand,
+/// Run the Routines CLI subcommand.
+pub async fn run_routines_cli(
+    routines_cmd: &RoutinesCommand,
     config_path: Option<&std::path::Path>,
 ) -> anyhow::Result<()> {
     let config = crate::config::Config::from_env_with_toml(config_path)
@@ -306,7 +307,7 @@ pub async fn run_cron_cli(
         .map_err(|e| anyhow::anyhow!("{e:#}"))?;
 
     let user_id = std::env::var("GATEWAY_USER_ID").unwrap_or_else(|_| "default".to_string());
-    run_cron_command(cron_cmd.clone(), db, &user_id).await
+    run_routines_command(routines_cmd.clone(), db, &user_id).await
 }
 
 /// Run the Memory CLI subcommand.

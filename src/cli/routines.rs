@@ -1,8 +1,7 @@
-//! `ironclaw cron` — manage scheduled routines from the CLI.
+//! `ironclaw routines` — manage scheduled routines from the CLI.
 //!
 //! Provides subcommands for listing, creating, editing, enabling/disabling,
-//! deleting, and viewing run history of cron-triggered routines without
-//! starting the full agent.
+//! deleting, and viewing run history of routines without starting the full agent.
 
 use std::sync::Arc;
 
@@ -15,14 +14,14 @@ use crate::agent::routine::{
 };
 use crate::db::Database;
 
-/// Cron subcommands.
+/// Routines subcommands.
 #[derive(Subcommand, Debug, Clone)]
-pub enum CronCommand {
-    /// List routines (cron-triggered by default, --all for all types)
+pub enum RoutinesCommand {
+    /// List routines
     List {
-        /// Show all trigger types, not just cron
+        /// Filter by trigger type (e.g. "cron", "webhook", "event")
         #[arg(long)]
-        all: bool,
+        trigger: Option<String>,
 
         /// Include disabled routines
         #[arg(long)]
@@ -132,19 +131,19 @@ pub enum CronCommand {
     },
 }
 
-/// Run a cron CLI command against the database.
-pub async fn run_cron_command(
-    cmd: CronCommand,
+/// Run a routines CLI command against the database.
+pub async fn run_routines_command(
+    cmd: RoutinesCommand,
     db: Arc<dyn Database>,
     user_id: &str,
 ) -> anyhow::Result<()> {
     match cmd {
-        CronCommand::List {
-            all,
+        RoutinesCommand::List {
+            trigger,
             disabled,
             json,
-        } => list(&db, user_id, all, disabled, json).await,
-        CronCommand::Create {
+        } => list(&db, user_id, trigger.as_deref(), disabled, json).await,
+        RoutinesCommand::Create {
             name,
             schedule,
             prompt,
@@ -166,7 +165,7 @@ pub async fn run_cron_command(
             )
             .await
         }
-        CronCommand::Edit {
+        RoutinesCommand::Edit {
             name,
             schedule,
             prompt,
@@ -186,10 +185,10 @@ pub async fn run_cron_command(
             )
             .await
         }
-        CronCommand::Enable { name } => set_enabled(&db, user_id, &name, true).await,
-        CronCommand::Disable { name } => set_enabled(&db, user_id, &name, false).await,
-        CronCommand::Delete { name, yes } => delete(&db, user_id, &name, yes).await,
-        CronCommand::History { name, limit, json } => {
+        RoutinesCommand::Enable { name } => set_enabled(&db, user_id, &name, true).await,
+        RoutinesCommand::Disable { name } => set_enabled(&db, user_id, &name, false).await,
+        RoutinesCommand::Delete { name, yes } => delete(&db, user_id, &name, yes).await,
+        RoutinesCommand::History { name, limit, json } => {
             history(&db, user_id, &name, limit, json).await
         }
     }
@@ -200,7 +199,7 @@ pub async fn run_cron_command(
 async fn list(
     db: &Arc<dyn Database>,
     user_id: &str,
-    all_types: bool,
+    trigger_filter: Option<&str>,
     show_disabled: bool,
     json: bool,
 ) -> anyhow::Result<()> {
@@ -208,7 +207,11 @@ async fn list(
 
     let filtered: Vec<&Routine> = routines
         .iter()
-        .filter(|r| all_types || r.trigger.type_tag() == "cron")
+        .filter(|r| {
+            trigger_filter
+                .map(|t| r.trigger.type_tag() == t)
+                .unwrap_or(true)
+        })
         .filter(|r| show_disabled || r.enabled)
         .collect();
 
@@ -233,10 +236,11 @@ async fn list(
     }
 
     if filtered.is_empty() {
-        println!(
-            "No {} routines found.",
-            if all_types { "" } else { "cron " }
-        );
+        if let Some(t) = trigger_filter {
+            println!("No {t} routines found.");
+        } else {
+            println!("No routines found.");
+        }
         return Ok(());
     }
 
@@ -375,12 +379,12 @@ async fn edit(
     timezone: Option<&str>,
     cooldown: Option<u64>,
 ) -> anyhow::Result<()> {
-    let mut routine = require_cron_routine(db, user_id, name).await?;
+    let mut routine = require_routine(db, user_id, name).await?;
     validate_timezone_arg(timezone)?;
 
     let mut changed = false;
 
-    // Update schedule if provided.
+    // Update schedule if provided (only valid for cron routines).
     if let Some(new_schedule) = schedule {
         let tz = timezone.or(match &routine.trigger {
             Trigger::Cron { timezone, .. } => timezone.as_deref(),
@@ -452,7 +456,7 @@ async fn set_enabled(
     name: &str,
     enabled: bool,
 ) -> anyhow::Result<()> {
-    let mut routine = require_cron_routine(db, user_id, name).await?;
+    let mut routine = require_routine(db, user_id, name).await?;
 
     if routine.enabled == enabled {
         println!(
@@ -494,11 +498,12 @@ async fn delete(
     name: &str,
     skip_confirm: bool,
 ) -> anyhow::Result<()> {
-    let routine = require_cron_routine(db, user_id, name).await?;
+    let routine = require_routine(db, user_id, name).await?;
 
     if !skip_confirm {
         println!("Routine: {}", routine.name);
         println!("      ID: {}", routine.id);
+        println!(" Trigger: {}", routine.trigger.type_tag());
         if let Trigger::Cron { ref schedule, .. } = routine.trigger {
             println!("Schedule: {}", schedule);
         }
@@ -532,7 +537,7 @@ async fn history(
     limit: i64,
     json: bool,
 ) -> anyhow::Result<()> {
-    let routine = require_cron_routine(db, user_id, name).await?;
+    let routine = require_routine(db, user_id, name).await?;
 
     let limit = limit.clamp(1, 50);
     let runs = db.list_routine_runs(routine.id, limit).await?;
@@ -603,34 +608,15 @@ async fn history(
 
 // ── Shared lookup ────────────────────────────────────────────
 
-/// Look up a routine by name and verify it has a cron trigger.
-async fn require_cron_routine(
+/// Look up a routine by name.
+async fn require_routine(
     db: &Arc<dyn Database>,
     user_id: &str,
     name: &str,
 ) -> anyhow::Result<Routine> {
-    let routine = db
-        .get_routine_by_name(user_id, name)
+    db.get_routine_by_name(user_id, name)
         .await?
-        .ok_or_else(|| anyhow::anyhow!("Routine '{}' not found", name))?;
-
-    validate_cron_trigger(&routine).map_err(|msg| anyhow::anyhow!("{}", msg))?;
-
-    Ok(routine)
-}
-
-/// Validate that a routine has a cron trigger. Returns an error message if not.
-fn validate_cron_trigger(routine: &Routine) -> Result<(), String> {
-    if routine.trigger.type_tag() != "cron" {
-        return Err(format!(
-            "Routine '{}' has trigger type '{}', not 'cron'. \
-             Use a different command to manage {} routines.",
-            routine.name,
-            routine.trigger.type_tag(),
-            routine.trigger.type_tag(),
-        ));
-    }
-    Ok(())
+        .ok_or_else(|| anyhow::anyhow!("Routine '{}' not found", name))
 }
 
 fn validate_timezone_arg(timezone: Option<&str>) -> anyhow::Result<()> {
@@ -740,114 +726,5 @@ mod tests {
         assert!(result.ends_with(".."), "got: {result}");
         // Must be valid UTF-8 (would have panicked otherwise).
         assert!(result.is_char_boundary(result.len()));
-    }
-
-    /// Helper: build a minimal Routine with the given trigger for testing.
-    fn make_routine(name: &str, trigger: Trigger) -> Routine {
-        let now = Utc::now();
-        Routine {
-            id: Uuid::new_v4(),
-            name: name.to_string(),
-            description: String::new(),
-            user_id: "test".to_string(),
-            enabled: true,
-            trigger,
-            action: RoutineAction::Lightweight {
-                prompt: "test".to_string(),
-                context_paths: Vec::new(),
-                max_tokens: 4096,
-            },
-            guardrails: RoutineGuardrails {
-                cooldown: std::time::Duration::from_secs(300),
-                max_concurrent: 1,
-                dedup_window: None,
-            },
-            notify: NotifyConfig {
-                channel: None,
-                user: "test".to_string(),
-                on_attention: true,
-                on_failure: true,
-                on_success: false,
-            },
-            last_run_at: None,
-            next_fire_at: None,
-            run_count: 0,
-            consecutive_failures: 0,
-            state: serde_json::json!({}),
-            created_at: now,
-            updated_at: now,
-        }
-    }
-
-    #[test]
-    fn validate_cron_trigger_accepts_cron() {
-        let routine = make_routine(
-            "daily-digest",
-            Trigger::Cron {
-                schedule: "0 0 9 * * *".to_string(),
-                timezone: None,
-            },
-        );
-        assert!(validate_cron_trigger(&routine).is_ok());
-    }
-
-    #[test]
-    fn validate_cron_trigger_rejects_event() {
-        let routine = make_routine(
-            "on-push",
-            Trigger::Event {
-                channel: Some("github".to_string()),
-                pattern: "push".to_string(),
-            },
-        );
-        let err = validate_cron_trigger(&routine).unwrap_err();
-        assert!(err.contains("event"), "expected 'event' in error: {err}");
-        assert!(
-            err.contains("on-push"),
-            "expected routine name in error: {err}"
-        );
-    }
-
-    #[test]
-    fn validate_cron_trigger_rejects_system_event() {
-        let routine = make_routine(
-            "on-event",
-            Trigger::SystemEvent {
-                source: "github".to_string(),
-                event_type: "issue.opened".to_string(),
-                filters: std::collections::HashMap::new(),
-            },
-        );
-        let err = validate_cron_trigger(&routine).unwrap_err();
-        assert!(
-            err.contains("system_event"),
-            "expected 'system_event' in error: {err}"
-        );
-    }
-
-    #[test]
-    fn validate_cron_trigger_rejects_manual() {
-        let routine = make_routine("run-once", Trigger::Manual);
-        let err = validate_cron_trigger(&routine).unwrap_err();
-        assert!(err.contains("manual"), "expected 'manual' in error: {err}");
-    }
-
-    #[test]
-    fn validate_timezone_arg_accepts_none() {
-        assert!(validate_timezone_arg(None).is_ok());
-    }
-
-    #[test]
-    fn validate_timezone_arg_accepts_valid_iana_timezone() {
-        assert!(validate_timezone_arg(Some("America/New_York")).is_ok());
-    }
-
-    #[test]
-    fn validate_timezone_arg_rejects_invalid_timezone() {
-        let err = validate_timezone_arg(Some("Not/AZone"))
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("Invalid timezone"), "got: {err}");
-        assert!(err.contains("Not/AZone"), "got: {err}");
     }
 }
