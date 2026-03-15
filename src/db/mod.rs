@@ -29,8 +29,6 @@ use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use uuid::Uuid;
 
-use crate::agent::BrokenTool;
-use crate::agent::routine::{Routine, RoutineRun, RunStatus};
 use crate::context::{ActionRecord, JobContext, JobState};
 use crate::error::DatabaseError;
 use crate::error::WorkspaceError;
@@ -38,6 +36,8 @@ use crate::history::{
     AgentJobRecord, AgentJobSummary, ConversationMessage, ConversationSummary, JobEventRecord,
     LlmCallRecord, SandboxJobRecord, SandboxJobSummary, SettingRow,
 };
+use crate::models::routine::{Routine, RoutineRun, RunStatus};
+use crate::models::tool_failure::ToolFailureRecord;
 use crate::workspace::{MemoryChunk, MemoryDocument, WorkspaceEntry};
 use crate::workspace::{SearchConfig, SearchResult};
 
@@ -401,7 +401,10 @@ pub trait ToolFailureStore: Send + Sync {
         tool_name: &str,
         error_message: &str,
     ) -> Result<(), DatabaseError>;
-    async fn get_broken_tools(&self, threshold: i32) -> Result<Vec<BrokenTool>, DatabaseError>;
+    async fn get_broken_tools(
+        &self,
+        threshold: i32,
+    ) -> Result<Vec<ToolFailureRecord>, DatabaseError>;
     async fn mark_tool_repaired(&self, tool_name: &str) -> Result<(), DatabaseError>;
     async fn increment_repair_attempts(&self, tool_name: &str) -> Result<(), DatabaseError>;
 }

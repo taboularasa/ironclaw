@@ -16,8 +16,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::channels::web::util::truncate_preview;
 use crate::llm::{ChatMessage, ToolCall};
+use crate::util::truncate_preview;
 
 /// A session containing one or more threads.
 #[derive(Debug, Clone, Serialize, Deserialize)]

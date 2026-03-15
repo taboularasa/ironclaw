@@ -12,11 +12,15 @@
 //! [`ObservabilityConfig`]. Future backends (OpenTelemetry, Prometheus)
 //! can be added by implementing [`Observer`].
 
+pub mod http_interceptor;
 mod log;
 mod multi;
 mod noop;
 pub mod traits;
 
+pub use self::http_interceptor::{
+    HttpExchange, HttpExchangeRequest, HttpExchangeResponse, HttpInterceptor,
+};
 pub use self::log::LogObserver;
 pub use self::multi::MultiObserver;
 pub use self::noop::NoopObserver;

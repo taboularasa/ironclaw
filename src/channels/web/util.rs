@@ -2,28 +2,10 @@
 
 use crate::channels::web::types::{ToolCallInfo, TurnInfo};
 
-/// Truncate a string to at most `max_bytes` bytes at a char boundary, appending "...".
-///
-/// If the input is wrapped in `<tool_output …>…</tool_output>` and truncation
-/// removes the closing tag, the tag is re-appended so downstream XML parsers
-/// never see an unclosed element.
+/// Delegates to [`crate::util::truncate_preview`] — the canonical implementation
+/// now lives in the shared utility module so non-web code can use it too.
 pub fn truncate_preview(s: &str, max_bytes: usize) -> String {
-    if s.len() <= max_bytes {
-        return s.to_string();
-    }
-    // Walk backwards from max_bytes to find a valid char boundary
-    let mut end = max_bytes;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    let mut result = format!("{}...", &s[..end]);
-
-    // Re-close <tool_output> if truncation cut through the closing tag.
-    if s.starts_with("<tool_output") && !result.ends_with("</tool_output>") {
-        result.push_str("\n</tool_output>");
-    }
-
-    result
+    crate::util::truncate_preview(s, max_bytes)
 }
 
 /// Build TurnInfo pairs from flat DB messages (user/tool_calls/assistant triples).

@@ -19,7 +19,7 @@ use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 use crate::channels::IncomingMessage;
-use crate::channels::web::types::SseEvent;
+use crate::events::DomainEvent as SseEvent;
 
 /// Spawn a background task that watches for events from a specific job and
 /// injects assistant messages into the agent loop.

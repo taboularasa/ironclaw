@@ -22,17 +22,11 @@ pub struct StuckJob {
     pub repair_attempts: u32,
 }
 
-/// A tool that has been detected as broken.
-#[derive(Debug, Clone)]
-pub struct BrokenTool {
-    pub name: String,
-    pub failure_count: u32,
-    pub last_error: Option<String>,
-    pub first_failure: DateTime<Utc>,
-    pub last_failure: DateTime<Utc>,
-    pub last_build_result: Option<serde_json::Value>,
-    pub repair_attempts: u32,
-}
+/// Backward-compatible alias for `ToolFailureRecord`.
+///
+/// The canonical type now lives in `crate::models::tool_failure` to break
+/// the circular dependency between `db` and `agent`.
+pub type BrokenTool = crate::models::tool_failure::ToolFailureRecord;
 
 /// Result of a repair attempt.
 #[derive(Debug)]
