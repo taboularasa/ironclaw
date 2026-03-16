@@ -614,8 +614,11 @@ impl ExtensionManager {
             match self.load_mcp_servers().await {
                 Ok(servers) => {
                     for server in &servers.servers {
-                        let authenticated =
-                            is_authenticated(server, &self.secrets, &self.user_id).await;
+                        let authenticated = if server.uses_runtime_auth_source() {
+                            self.is_runtime_authenticated(server).await
+                        } else {
+                            is_authenticated(server, &self.secrets, &self.user_id).await
+                        };
                         let clients = self.mcp_clients.read().await;
                         let active = clients.contains_key(&server.name);
 
@@ -646,7 +649,7 @@ impl ExtensionManager {
                             active,
                             tools,
                             needs_setup: false,
-                            has_auth: false,
+                            has_auth: server.requires_auth(),
                             installed: true,
                             activation_error: None,
                             version: None,
@@ -1292,10 +1295,33 @@ impl ExtensionManager {
         };
 
         if let Some(ref companion) = self.companion_mcp_server {
-            servers.upsert(companion.clone());
+            servers.insert_if_absent(companion.clone());
         }
 
         Ok(servers)
+    }
+
+    async fn is_runtime_authenticated(&self, server: &McpServerConfig) -> bool {
+        match server.auth_source {
+            Some(crate::tools::mcp::config::McpAuthSource::NearAi) => {
+                if self.nearai_api_key.is_some() {
+                    return true;
+                }
+
+                if let Ok(key) = std::env::var("NEARAI_API_KEY")
+                    && !key.trim().is_empty()
+                {
+                    return true;
+                }
+
+                if let Some(ref session) = self.nearai_session_manager {
+                    return session.has_token().await;
+                }
+
+                false
+            }
+            None => false,
+        }
     }
 
     async fn get_mcp_server(
@@ -1849,6 +1875,20 @@ impl ExtensionManager {
             .get_mcp_server(name)
             .await
             .map_err(|e| ExtensionError::NotInstalled(e.to_string()))?;
+
+        if server.uses_runtime_auth_source() {
+            if self.is_runtime_authenticated(&server).await {
+                return Ok(AuthResult::authenticated(name, ExtensionKind::McpServer));
+            }
+
+            return Ok(AuthResult::needs_setup(
+                name,
+                ExtensionKind::McpServer,
+                "This MCP server reuses your active NEAR AI authentication. Configure a NEAR AI API key or sign in to NEAR AI first, then try again."
+                    .to_string(),
+                None,
+            ));
+        }
 
         // Check if already authenticated
         if is_authenticated(&server, &self.secrets, &self.user_id).await {

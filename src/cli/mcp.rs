@@ -410,6 +410,17 @@ async fn auth_server(name: String, user_id: String) -> anyhow::Result<()> {
         .cloned()
         .ok_or_else(|| anyhow::anyhow!("Server '{}' not found", name))?;
 
+    if server.uses_runtime_auth_source() {
+        println!();
+        println!(
+            "  Server '{}' reuses your active NEAR AI authentication and does not support separate MCP OAuth.",
+            name
+        );
+        println!("  Configure NEAR AI auth (API key or session login) instead.");
+        println!();
+        return Ok(());
+    }
+
     // Initialize secrets store
     let secrets = get_secrets_store().await?;
 

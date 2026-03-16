@@ -289,8 +289,8 @@ impl McpServerConfig {
     }
 }
 
-/// Default name used for the companion chat-api MCP server derived from NEAR AI config.
-pub const NEARAI_COMPANION_MCP_NAME: &str = "chat_api";
+/// Reserved name used for the companion chat-api MCP server derived from NEAR AI config.
+pub const NEARAI_COMPANION_MCP_NAME: &str = "_nearai_companion_mcp";
 
 /// Build the companion chat-api MCP server from the active NearAI config.
 ///
@@ -411,6 +411,16 @@ impl McpServersFile {
             *existing = config;
         } else {
             self.servers.push(config);
+        }
+    }
+
+    /// Insert a server only if no server with the same name already exists.
+    pub fn insert_if_absent(&mut self, config: McpServerConfig) -> bool {
+        if self.get(&config.name).is_some() {
+            false
+        } else {
+            self.servers.push(config);
+            true
         }
     }
 

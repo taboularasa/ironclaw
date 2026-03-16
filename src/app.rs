@@ -481,7 +481,13 @@ impl AppBuilder {
                 match servers_result {
                     Ok(mut servers) => {
                         if let Some(companion) = companion_mcp_server {
-                            servers.upsert(companion);
+                            let companion_name = companion.name.clone();
+                            if !servers.insert_if_absent(companion) {
+                                tracing::debug!(
+                                    "Skipping derived MCP companion '{}': an existing config with that name is already present",
+                                    companion_name
+                                );
+                            }
                         }
                         let enabled: Vec<_> = servers.enabled_servers().cloned().collect();
                         if !enabled.is_empty() {
