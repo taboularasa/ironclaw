@@ -17,6 +17,8 @@ target/
 # Python
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
 
 # Benchmark results (local runs, not committed)
 bench-results/
