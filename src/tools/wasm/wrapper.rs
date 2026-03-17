@@ -2329,7 +2329,7 @@ mod tests {
             }
         });
         let params = serde_json::json!({"count": 5});
-        let result = super::coerce_params_to_schema(params, &schema);
+        let result = crate::tools::coercion::prepare_params_for_schema(&params, &schema);
         assert_eq!(result["count"], serde_json::json!(5));
     }
 
@@ -2342,7 +2342,7 @@ mod tests {
             }
         });
         let params = serde_json::json!({"count": "not-a-number"});
-        let result = super::coerce_params_to_schema(params, &schema);
+        let result = crate::tools::coercion::prepare_params_for_schema(&params, &schema);
         // Should remain as string since it can't be parsed
         assert_eq!(result["count"], serde_json::json!("not-a-number"));
     }
@@ -2553,7 +2553,7 @@ mod tests {
             "additionalProperties": true
         });
         let params = serde_json::json!({"query": "test", "count": "10"});
-        let result = super::coerce_params_to_schema(params, &permissive);
+        let result = crate::tools::coercion::prepare_params_for_schema(&params, &permissive);
         // With empty properties, no coercion happens — string stays string
         assert_eq!(result["count"], serde_json::json!("10"));
     }
