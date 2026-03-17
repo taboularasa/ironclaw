@@ -559,14 +559,12 @@ async fn test_server(name: String, user_id: String) -> anyhow::Result<()> {
         } else {
             // Use the factory to dispatch on transport type (HTTP, stdio, unix)
             let process_manager = Arc::new(McpProcessManager::new());
-            let llm = resolve_llm_from_env()?;
-            let nearai_session = crate::llm::create_session_manager(llm.session.clone()).await;
             (
                 create_client_from_config(
                     server.clone(),
                     &session_manager,
-                    Some(nearai_session),
-                    llm.nearai.api_key.clone(),
+                    None,
+                    None,
                     &process_manager,
                     None,
                     "default",

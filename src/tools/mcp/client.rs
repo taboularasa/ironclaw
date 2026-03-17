@@ -674,6 +674,10 @@ fn normalize_mcp_tool_arguments(tool_name: &str, value: serde_json::Value) -> se
         return value;
     }
 
+    // This is intentionally a minimal last-mile cleanup for the current
+    // provider-backed web_search MCP flow. It strips the most common obviously
+    // bad values we observed from model output, but it is not a substitute for
+    // stricter tool schema constraints or provider-specific validation.
     let serde_json::Value::Object(mut map) = value else {
         return value;
     };
