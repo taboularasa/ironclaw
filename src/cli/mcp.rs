@@ -281,6 +281,13 @@ async fn add_server(args: McpAddArgs) -> anyhow::Result<()> {
 
 /// Remove an MCP server.
 async fn remove_server(name: String) -> anyhow::Result<()> {
+    if config::is_nearai_companion_server_name(&name) {
+        anyhow::bail!(
+            "Server '{}' is derived from the active NEAR AI provider and cannot be removed directly",
+            name
+        );
+    }
+
     let db = connect_db().await;
     let mut servers = load_servers(db.as_deref()).await?;
     if !servers.remove(&name) {
@@ -611,6 +618,13 @@ async fn test_server(name: String, user_id: String) -> anyhow::Result<()> {
 
 /// Toggle server enabled/disabled state.
 async fn toggle_server(name: String, enable: bool, disable: bool) -> anyhow::Result<()> {
+    if config::is_nearai_companion_server_name(&name) {
+        anyhow::bail!(
+            "Server '{}' is derived from the active NEAR AI provider and cannot be toggled directly",
+            name
+        );
+    }
+
     let db = connect_db().await;
     let mut servers = load_servers(db.as_deref()).await?;
 
@@ -647,11 +661,19 @@ async fn connect_db() -> Option<Arc<dyn Database>> {
 
 /// Load MCP servers (DB if available, else disk).
 async fn load_servers(db: Option<&dyn Database>) -> Result<McpServersFile, config::ConfigError> {
-    if let Some(db) = db {
-        config::load_mcp_servers_from_db(db, DEFAULT_USER_ID).await
+    let mut servers = if let Some(db) = db {
+        config::load_mcp_servers_from_db(db, DEFAULT_USER_ID).await?
     } else {
-        config::load_mcp_servers().await
+        config::load_mcp_servers().await?
+    };
+
+    if let Ok(cfg) = Config::from_env().await
+        && let Some(companion) = config::derive_nearai_companion_mcp_server(&cfg)
+    {
+        servers.insert_if_absent(companion);
     }
+
+    Ok(servers)
 }
 
 /// Save MCP servers (DB if available, else disk).

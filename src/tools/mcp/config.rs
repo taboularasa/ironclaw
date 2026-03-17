@@ -292,6 +292,10 @@ impl McpServerConfig {
 /// Reserved name used for the companion chat-api MCP server derived from NEAR AI config.
 pub const NEARAI_COMPANION_MCP_NAME: &str = "_nearai_companion_mcp";
 
+pub fn is_nearai_companion_server_name(name: &str) -> bool {
+    name == NEARAI_COMPANION_MCP_NAME
+}
+
 /// Build the companion chat-api MCP server from the active NearAI config.
 ///
 /// The MCP endpoint is treated as a sibling to the versioned REST API:

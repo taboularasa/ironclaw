@@ -1055,6 +1055,9 @@ impl ExtensionManager {
                             tools,
                             needs_setup: false,
                             has_auth: server.requires_auth(),
+                            derived: crate::tools::mcp::config::is_nearai_companion_server_name(
+                                &server.name,
+                            ),
                             installed: true,
                             activation_error: None,
                             version: None,
@@ -1106,6 +1109,7 @@ impl ExtensionManager {
                             tools: if active { vec![name] } else { Vec::new() },
                             needs_setup: auth_state == ToolAuthState::NeedsSetup,
                             has_auth: auth_state != ToolAuthState::NoAuth,
+                            derived: false,
                             installed: true,
                             activation_error: None,
                             version,
@@ -1162,6 +1166,7 @@ impl ExtensionManager {
                             tools: Vec::new(),
                             needs_setup: auth_state == ToolAuthState::NeedsSetup,
                             has_auth: auth_state != ToolAuthState::NoAuth,
+                            derived: false,
                             installed: true,
                             activation_error,
                             version,
@@ -1202,6 +1207,7 @@ impl ExtensionManager {
                     tools: Vec::new(),
                     needs_setup: false,
                     has_auth: true,
+                    derived: false,
                     installed: true,
                     activation_error: None,
                     version: None,
@@ -1236,6 +1242,7 @@ impl ExtensionManager {
                     tools: Vec::new(),
                     needs_setup: false,
                     has_auth: false,
+                    derived: false,
                     installed: false,
                     activation_error: None,
                     version: entry.version,
@@ -1266,6 +1273,12 @@ impl ExtensionManager {
 
         match kind {
             ExtensionKind::McpServer => {
+                if crate::tools::mcp::config::is_nearai_companion_server_name(name) {
+                    return Err(ExtensionError::Config(
+                        "This MCP server is derived from the active NEAR AI provider and cannot be removed directly".to_string(),
+                    ));
+                }
+
                 // Unregister tools with this server's prefix
                 let tool_names: Vec<String> = self
                     .tool_registry
