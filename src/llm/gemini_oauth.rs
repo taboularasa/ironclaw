@@ -368,8 +368,7 @@ impl CredentialManager {
             Ok(mut new_cred) => {
                 // Preserve or discover project_id after token refresh
                 if new_cred.project_id.is_none()
-                    && let Some(pid) =
-                        self.discover_project_id(&new_cred.access_token).await
+                    && let Some(pid) = self.discover_project_id(&new_cred.access_token).await
                 {
                     new_cred.project_id = Some(pid);
                 }
@@ -1549,7 +1548,7 @@ impl GeminiOauthProvider {
 
         static RE: LazyLock<regex::Regex> = LazyLock::new(|| {
             regex::Regex::new(r"reset after (?:(\d+)h)?(?:(\d+)m)?(\d+)s")
-                .expect("invalid retry_after regex")
+                .expect("invalid retry_after regex") // safety: hardcoded literal
         });
 
         let caps = RE.captures(message)?;
