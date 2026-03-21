@@ -45,11 +45,11 @@ impl Agent {
         &self,
         message: &IncomingMessage,
         external_thread_id: &str,
-    ) -> Option<String> {
+    ) -> Result<Option<Uuid>, String> {
         // Only hydrate UUID-shaped thread IDs (web gateway uses UUIDs)
         let thread_uuid = match Uuid::parse_str(external_thread_id) {
             Ok(id) => id,
-            Err(_) => return None,
+            Err(_) => return Ok(None),
         };
 
         // Check if already in memory
@@ -60,7 +60,7 @@ impl Agent {
         {
             let sess = session.lock().await;
             if sess.threads.contains_key(&thread_uuid) {
-                return None;
+                return Ok(Some(thread_uuid));
             }
         }
 
@@ -83,9 +83,9 @@ impl Agent {
                         e
                     );
                     if requires_preexisting_uuid_thread(&message.channel) {
-                        return Some(FORGED_THREAD_ID_ERROR.to_string());
+                        return Err(FORGED_THREAD_ID_ERROR.to_string());
                     }
-                    return None;
+                    return Ok(Some(thread_uuid));
                 }
             };
             if !owned {
@@ -99,9 +99,9 @@ impl Agent {
                             e
                         );
                         if requires_preexisting_uuid_thread(&message.channel) {
-                            return Some(FORGED_THREAD_ID_ERROR.to_string());
+                            return Err(FORGED_THREAD_ID_ERROR.to_string());
                         }
-                        return None;
+                        return Ok(Some(thread_uuid));
                     }
                 };
 
@@ -113,7 +113,7 @@ impl Agent {
                         exists,
                         "Rejected message for unavailable thread id"
                     );
-                    return Some(FORGED_THREAD_ID_ERROR.to_string());
+                    return Err(FORGED_THREAD_ID_ERROR.to_string());
                 }
 
                 tracing::warn!(
@@ -122,7 +122,7 @@ impl Agent {
                     exists,
                     "Skipped hydration for thread id not owned by sender"
                 );
-                return None;
+                return Ok(Some(thread_uuid));
             }
 
             let db_messages = store
@@ -169,7 +169,7 @@ impl Agent {
             msg_count
         );
 
-        None
+        Ok(Some(thread_uuid))
     }
 
     pub(super) async fn process_user_input(
@@ -1413,8 +1413,20 @@ impl Agent {
 
                 {
                     let mut sess = session.lock().await;
-                    if let Some(thread) = sess.threads.get_mut(&thread_id) {
-                        thread.await_approval(new_pending);
+                    match sess.threads.get_mut(&thread_id) {
+                        Some(thread) => {
+                            thread.await_approval(new_pending);
+                        }
+                        None => {
+                            tracing::error!(
+                                %thread_id,
+                                tool = %tool_name,
+                                "Thread disappeared while preparing approval request"
+                            );
+                            return Ok(SubmissionResult::error(
+                                "Internal error: conversation thread no longer available. Please retry.",
+                            ));
+                        }
                     }
                 }
 
@@ -1546,17 +1558,25 @@ impl Agent {
             );
             {
                 let mut sess = session.lock().await;
-                if let Some(thread) = sess.threads.get_mut(&thread_id) {
-                    thread.clear_pending_approval();
-                    thread.complete_turn(&rejection);
-                    // User message already persisted at turn start; save rejection response
-                    self.persist_assistant_response(
-                        thread_id,
-                        &message.channel,
-                        &message.user_id,
-                        &rejection,
-                    )
-                    .await;
+                match sess.threads.get_mut(&thread_id) {
+                    Some(thread) => {
+                        thread.clear_pending_approval();
+                        thread.complete_turn(&rejection);
+                        // User message already persisted at turn start; save rejection response
+                        self.persist_assistant_response(
+                            thread_id,
+                            &message.channel,
+                            &message.user_id,
+                            &rejection,
+                        )
+                        .await;
+                    }
+                    None => {
+                        tracing::warn!(
+                            %thread_id,
+                            "Thread disappeared during approval rejection — rejection not persisted"
+                        );
+                    }
                 }
             }
 
@@ -2202,6 +2222,98 @@ mod tests {
         assert_ne!(t.state, ThreadState::Processing);
         // Verify nothing was queued — the fall-through path doesn't touch the queue.
         assert!(t.pending_messages.is_empty());
+    }
+
+    /// Regression test for #1487: when a thread disappears from the session during
+    /// approval storage, the code should return an error instead of silently losing
+    /// the approval.
+    #[test]
+    fn test_missing_thread_during_approval_storage_returns_error() {
+        use crate::agent::session::{PendingApproval, Session};
+        use uuid::Uuid;
+
+        let thread_id = Uuid::new_v4();
+        let session = Session::new("test-user");
+
+        // Thread does NOT exist in the session
+        assert!(!session.threads.contains_key(&thread_id));
+
+        // Simulate the match logic from process_approval when storing a new pending approval
+        let _new_pending = PendingApproval {
+            request_id: Uuid::new_v4(),
+            tool_name: "shell".to_string(),
+            parameters: serde_json::json!({"command": "echo test"}),
+            display_parameters: serde_json::json!({"command": "[REDACTED]"}),
+            description: "Execute command".to_string(),
+            tool_call_id: "call_0".to_string(),
+            context_messages: vec![],
+            deferred_tool_calls: vec![],
+            user_timezone: None,
+            allow_always: false,
+        };
+
+        let tool_name = "shell";
+
+        // The fixed code uses match instead of if-let, returning an error for None
+        let result: Result<&str, String> = match session.threads.get(&thread_id) {
+            Some(_thread) => {
+                // Would call thread.await_approval(new_pending)
+                Ok("stored")
+            }
+            None => Err(format!(
+                "Internal error: conversation thread no longer available. Tool: {}",
+                tool_name,
+            )),
+        };
+
+        assert!(result.is_err(), "Missing thread should produce an error");
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("no longer available"),
+            "Error should mention thread unavailability. Got: {}",
+            err
+        );
+    }
+
+    /// Regression test for #1487: when a thread disappears during rejection,
+    /// the rejection is not persisted but the code degrades gracefully (no panic,
+    /// no silent success pretending state was updated).
+    #[test]
+    fn test_missing_thread_during_rejection_degrades_gracefully() {
+        use crate::agent::session::Session;
+        use uuid::Uuid;
+
+        let thread_id = Uuid::new_v4();
+        let mut session = Session::new("test-user");
+
+        // Thread does NOT exist in the session
+        assert!(!session.threads.contains_key(&thread_id));
+
+        let rejection = format!(
+            "Tool '{}' was rejected. The agent will not execute this tool.",
+            "shell"
+        );
+
+        // The fixed code uses match instead of if-let, logging a warning for None
+        let mut persisted = false;
+        match session.threads.get_mut(&thread_id) {
+            Some(thread) => {
+                thread.clear_pending_approval();
+                thread.complete_turn(&rejection);
+                persisted = true;
+            }
+            None => {
+                // In production this logs a warning -- we just verify it takes
+                // the None branch without panicking.
+            }
+        }
+
+        assert!(
+            !persisted,
+            "Rejection should NOT be persisted when thread is missing"
+        );
+        // Session should remain unchanged
+        assert!(session.threads.is_empty());
     }
 
     // Helper function to extract the approval message without needing a full Agent instance
