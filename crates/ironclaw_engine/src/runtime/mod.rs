@@ -1,4 +1,13 @@
 //! Thread lifecycle management.
 //!
-//! ThreadManager, thread tree, and inter-thread messaging.
-//! Implemented in Phase 2.
+//! - [`ThreadManager`] — top-level orchestrator for spawning and supervising threads
+//! - [`ThreadTree`] — parent-child relationship tracking
+//! - [`messaging`] — inter-thread signal channel
+
+pub mod manager;
+pub mod messaging;
+pub mod tree;
+
+pub use manager::ThreadManager;
+pub use messaging::ThreadOutcome;
+pub use tree::ThreadTree;

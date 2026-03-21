@@ -1,5 +1,13 @@
 //! Step execution.
 //!
-//! The core execution loop that replaces `run_agentic_loop()`, plus
-//! tier-specific executors (structured tool calls, embedded scripting, etc.).
-//! Implemented in Phase 2.
+//! - [`ExecutionLoop`] — core loop replacing `run_agentic_loop()`
+//! - [`structured`] — Tier 0 action execution (structured tool calls)
+//! - [`context`] — context building for LLM calls
+//! - [`intent`] — tool intent nudge detection
+
+pub mod context;
+pub mod intent;
+pub mod loop_engine;
+pub mod structured;
+
+pub use loop_engine::ExecutionLoop;

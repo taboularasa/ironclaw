@@ -1,5 +1,10 @@
 //! Memory document system.
 //!
-//! Project-scoped document storage and retrieval engine for building
-//! thread context from durable knowledge.
-//! Implemented in Phase 2 (store) and Phase 4 (retrieval).
+//! - [`MemoryStore`] — project-scoped document CRUD
+//! - [`RetrievalEngine`] — context building from project docs (Phase 4)
+
+pub mod retrieval;
+pub mod store;
+
+pub use retrieval::RetrievalEngine;
+pub use store::MemoryStore;

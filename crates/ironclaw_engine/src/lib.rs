@@ -44,3 +44,24 @@ pub use types::thread::{Thread, ThreadConfig, ThreadId, ThreadState, ThreadType}
 pub use traits::effect::{EffectExecutor, ThreadExecutionContext};
 pub use traits::llm::{LlmBackend, LlmCallConfig, LlmOutput};
 pub use traits::store::Store;
+
+// ── Re-exports: capability ────────────────────────────────────
+
+pub use capability::registry::CapabilityRegistry;
+pub use capability::lease::LeaseManager;
+pub use capability::policy::{PolicyDecision, PolicyEngine};
+
+// ── Re-exports: runtime ───────────────────────────────────────
+
+pub use runtime::manager::ThreadManager;
+pub use runtime::messaging::ThreadOutcome;
+pub use runtime::tree::ThreadTree;
+
+// ── Re-exports: executor ──────────────────────────────────────
+
+pub use executor::ExecutionLoop;
+
+// ── Re-exports: memory ────────────────────────────────────────
+
+pub use memory::MemoryStore;
+pub use memory::RetrievalEngine;
