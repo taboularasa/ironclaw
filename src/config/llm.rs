@@ -37,6 +37,7 @@ impl LlmConfig {
             },
             provider: None,
             bedrock: None,
+            openai_codex: None,
             request_timeout_secs: 120,
             cheap_model: None,
             smart_routing_cascade: false,
@@ -79,6 +80,9 @@ impl LlmConfig {
             backend_lower == "nearai" || backend_lower == "near_ai" || backend_lower == "near";
         let is_bedrock =
             backend_lower == "bedrock" || backend_lower == "aws_bedrock" || backend_lower == "aws";
+        let is_openai_codex = backend_lower == "openai_codex"
+            || backend_lower == "openai-codex"
+            || backend_lower == "codex";
 
         // Check custom providers defined
         let custom_provider = settings
@@ -88,6 +92,7 @@ impl LlmConfig {
 
         if !is_nearai
             && !is_bedrock
+            && !is_openai_codex
             && custom_provider.is_none()
             && registry.find(&backend_lower).is_none()
         {
@@ -143,8 +148,8 @@ impl LlmConfig {
             smart_routing_cascade: parse_optional_env("SMART_ROUTING_CASCADE", true)?,
         };
 
-        // Resolve registry provider config (for non-NearAI, non-Bedrock backends)
-        let provider = if is_nearai || is_bedrock {
+        // Resolve registry provider config (for non-NearAI, non-Bedrock, non-Codex backends)
+        let provider = if is_nearai || is_bedrock || is_openai_codex {
             None
         } else if let Some(custom) = custom_provider {
             Some(Self::resolve_custom_provider(custom, settings)?)
@@ -193,6 +198,38 @@ impl LlmConfig {
             None
         };
 
+        // Resolve OpenAI Codex config
+        let openai_codex = if is_openai_codex {
+            // Model: OPENAI_CODEX_MODEL > OPENAI_MODEL > settings.selected_model > default
+            let model = optional_env("OPENAI_CODEX_MODEL")?
+                .or(optional_env("OPENAI_MODEL")?)
+                .or_else(|| settings.selected_model.clone())
+                .unwrap_or_else(|| "gpt-5.3-codex".to_string());
+            let auth_endpoint = optional_env("OPENAI_CODEX_AUTH_URL")?
+                .unwrap_or_else(|| "https://auth.openai.com".to_string());
+            validate_base_url(&auth_endpoint, "OPENAI_CODEX_AUTH_URL")?;
+            let api_base_url = optional_env("OPENAI_CODEX_API_URL")?
+                .unwrap_or_else(|| "https://chatgpt.com/backend-api/codex".to_string());
+            validate_base_url(&api_base_url, "OPENAI_CODEX_API_URL")?;
+            let client_id = optional_env("OPENAI_CODEX_CLIENT_ID")?
+                .unwrap_or_else(|| "app_EMoamEEZ73f0CkXaXp7hrann".to_string());
+            let session_path = optional_env("OPENAI_CODEX_SESSION_PATH")?
+                .map(PathBuf::from)
+                .unwrap_or_else(|| ironclaw_base_dir().join("openai_codex_session.json"));
+            let token_refresh_margin_secs =
+                parse_optional_env("OPENAI_CODEX_REFRESH_MARGIN_SECS", 300)?;
+            Some(OpenAiCodexConfig {
+                model,
+                auth_endpoint,
+                api_base_url,
+                client_id,
+                session_path,
+                token_refresh_margin_secs,
+            })
+        } else {
+            None
+        };
+
         let request_timeout_secs = parse_optional_env("LLM_REQUEST_TIMEOUT_SECS", 120)?;
 
         // Generic cheap model (works with any backend).
@@ -208,6 +245,8 @@ impl LlmConfig {
                 "nearai".to_string()
             } else if is_bedrock {
                 "bedrock".to_string()
+            } else if is_openai_codex {
+                "openai_codex".to_string()
             } else if let Some(ref p) = provider {
                 p.provider_id.clone()
             } else {
@@ -217,6 +256,7 @@ impl LlmConfig {
             nearai,
             provider,
             bedrock,
+            openai_codex,
             request_timeout_secs,
             cheap_model,
             smart_routing_cascade,
@@ -434,6 +474,14 @@ impl LlmConfig {
         } else {
             Vec::new()
         };
+        let extra_headers = if canonical_id == "github_copilot" {
+            merge_extra_headers(
+                crate::llm::github_copilot_auth::default_headers(),
+                extra_headers,
+            )
+        } else {
+            extra_headers
+        };
 
         // Resolve OAuth token (Anthropic-specific: `claude login` flow).
         // Only check for OAuth token when the provider is actually Anthropic.
@@ -516,6 +564,26 @@ fn parse_extra_headers(val: &str) -> Result<Vec<(String, String)>, ConfigError> 
         headers.push((key.to_string(), value.trim().to_string()));
     }
     Ok(headers)
+}
+
+fn merge_extra_headers(
+    defaults: Vec<(String, String)>,
+    overrides: Vec<(String, String)>,
+) -> Vec<(String, String)> {
+    let mut merged = Vec::new();
+    let mut positions = std::collections::HashMap::<String, usize>::new();
+
+    for (key, value) in defaults.into_iter().chain(overrides) {
+        let normalized = key.to_ascii_lowercase();
+        if let Some(existing_index) = positions.get(&normalized).copied() {
+            merged[existing_index] = (key, value);
+        } else {
+            positions.insert(normalized, merged.len());
+            merged.push((key, value));
+        }
+    }
+
+    merged
 }
 
 /// Get the default session file path (~/.ironclaw/session.json).
@@ -645,6 +713,29 @@ mod tests {
             vec![
                 ("HTTP-Referer".to_string(), "https://myapp.com".to_string()),
                 ("X-Title".to_string(), "MyApp".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn merge_extra_headers_prefers_overrides_case_insensitively() {
+        let merged = merge_extra_headers(
+            vec![
+                ("User-Agent".to_string(), "default-agent".to_string()),
+                ("X-Test".to_string(), "default".to_string()),
+            ],
+            vec![
+                ("user-agent".to_string(), "override-agent".to_string()),
+                ("X-Extra".to_string(), "present".to_string()),
+            ],
+        );
+
+        assert_eq!(
+            merged,
+            vec![
+                ("user-agent".to_string(), "override-agent".to_string()),
+                ("X-Test".to_string(), "default".to_string()),
+                ("X-Extra".to_string(), "present".to_string()),
             ]
         );
     }
@@ -802,6 +893,54 @@ mod tests {
     }
 
     #[test]
+    fn registry_provider_resolves_github_copilot_alias() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::set_var("LLM_BACKEND", "github-copilot");
+            std::env::set_var("GITHUB_COPILOT_TOKEN", "gho_test_token");
+            std::env::set_var(
+                "GITHUB_COPILOT_EXTRA_HEADERS",
+                "Copilot-Integration-Id:custom-chat,X-Test:enabled",
+            );
+        }
+
+        let settings = Settings::default();
+
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+        assert_eq!(cfg.backend, "github_copilot");
+        let provider = cfg.provider.expect("provider config should be present");
+        assert_eq!(provider.provider_id, "github_copilot");
+        assert_eq!(provider.base_url, "https://api.githubcopilot.com");
+        assert_eq!(provider.model, "gpt-4o");
+        assert!(
+            provider
+                .extra_headers
+                .iter()
+                .any(|(key, value)| { key == "Copilot-Integration-Id" && value == "custom-chat" })
+        );
+        assert!(
+            provider
+                .extra_headers
+                .iter()
+                .any(|(key, value)| key == "User-Agent" && value == "GitHubCopilotChat/0.26.7")
+        );
+        assert!(
+            provider
+                .extra_headers
+                .iter()
+                .any(|(key, value)| key == "X-Test" && value == "enabled")
+        );
+
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("LLM_BACKEND");
+            std::env::remove_var("GITHUB_COPILOT_TOKEN");
+            std::env::remove_var("GITHUB_COPILOT_EXTRA_HEADERS");
+        }
+    }
+
+    #[test]
     fn nearai_backend_has_no_registry_provider() {
         let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
         // SAFETY: Under ENV_MUTEX.
@@ -900,19 +1039,19 @@ mod tests {
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::set_var("LLM_BACKEND", "openai_compatible");
-            std::env::set_var("LLM_BASE_URL", "http://env-url/v1");
+            std::env::set_var("LLM_BASE_URL", "http://localhost:8000/v1");
         }
 
         let settings = Settings {
             llm_backend: Some("openai_compatible".to_string()),
-            openai_compatible_base_url: Some("http://settings-url/v1".to_string()),
+            openai_compatible_base_url: Some("http://localhost:9000/v1".to_string()),
             ..Default::default()
         };
 
         let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
         let provider = cfg.provider.expect("should have provider config");
         assert_eq!(
-            provider.base_url, "http://env-url/v1",
+            provider.base_url, "http://localhost:8000/v1",
             "env var should take priority over settings"
         );
 
@@ -924,7 +1063,7 @@ mod tests {
         let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
         let provider = cfg.provider.expect("should have provider config");
         assert_eq!(
-            provider.base_url, "http://settings-url/v1",
+            provider.base_url, "http://localhost:9000/v1",
             "settings should take priority over registry default"
         );
 
@@ -1220,10 +1359,21 @@ mod tests {
             cfg.backend, "myprovider",
             "DB setting should override LLM_BACKEND env var"
         );
-
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("LLM_BACKEND");
+        }
+    }
+
+    // ── OpenAI Codex tests ──────────────────────────────────────────
+
+    /// Clear all openai-codex-related env vars.
+    fn clear_openai_codex_env() {
+        // SAFETY: Only called under ENV_MUTEX in tests.
+        unsafe {
+            std::env::remove_var("LLM_BACKEND");
+            std::env::remove_var("OPENAI_CODEX_MODEL");
+            std::env::remove_var("OPENAI_MODEL");
         }
     }
 
@@ -1259,6 +1409,26 @@ mod tests {
     }
 
     #[test]
+    fn openai_codex_resolves_config() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        clear_openai_codex_env();
+
+        let settings = Settings {
+            llm_backend: Some("openai_codex".to_string()),
+            ..Default::default()
+        };
+
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+        assert_eq!(cfg.backend, "openai_codex");
+        let codex = cfg.openai_codex.expect("codex config should be present");
+        assert_eq!(codex.model, "gpt-5.3-codex"); // default
+        assert!(
+            cfg.provider.is_none(),
+            "codex should not use registry provider"
+        );
+    }
+
+    #[test]
     fn selected_model_takes_priority_over_builtin_override_model() {
         let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
         // SAFETY: Under ENV_MUTEX.
@@ -1288,6 +1458,30 @@ mod tests {
             provider.model, "llama-3.3-70b-versatile",
             "selected_model (/model command) must take priority over builtin override"
         );
+    }
+
+    #[test]
+    fn openai_codex_model_env_resolution() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        clear_openai_codex_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::set_var("OPENAI_CODEX_MODEL", "o3-pro");
+        }
+
+        let settings = Settings {
+            llm_backend: Some("openai_codex".to_string()),
+            ..Default::default()
+        };
+
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+        let codex = cfg.openai_codex.expect("codex config should be present");
+        assert_eq!(codex.model, "o3-pro");
+
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("OPENAI_CODEX_MODEL");
+        }
     }
 
     #[test]
@@ -1325,5 +1519,104 @@ mod tests {
             "gsk_test_key",
             "builtin override api_key should be used when env var is absent"
         );
+    }
+
+    #[test]
+    fn openai_codex_falls_back_to_openai_model() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        clear_openai_codex_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::set_var("OPENAI_MODEL", "gpt-4o");
+        }
+
+        let settings = Settings {
+            llm_backend: Some("openai_codex".to_string()),
+            ..Default::default()
+        };
+
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+        let codex = cfg.openai_codex.expect("codex config should be present");
+        assert_eq!(codex.model, "gpt-4o");
+
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("OPENAI_MODEL");
+        }
+    }
+
+    #[test]
+    fn openai_codex_falls_back_to_selected_model() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        clear_openai_codex_env();
+
+        let settings = Settings {
+            llm_backend: Some("openai_codex".to_string()),
+            selected_model: Some("gpt-4o-mini".to_string()),
+            ..Default::default()
+        };
+
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+        let codex = cfg.openai_codex.expect("codex config should be present");
+        assert_eq!(codex.model, "gpt-4o-mini");
+    }
+
+    /// Regression: SSRF validation on OPENAI_CODEX_API_URL (#1103).
+    #[test]
+    fn openai_codex_rejects_ssrf_api_url() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        clear_openai_codex_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::set_var(
+                "OPENAI_CODEX_API_URL",
+                "http://169.254.169.254/latest/meta-data",
+            );
+        }
+
+        let settings = Settings {
+            llm_backend: Some("openai_codex".to_string()),
+            ..Default::default()
+        };
+
+        let err = LlmConfig::resolve(&settings).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("OPENAI_CODEX_API_URL"),
+            "error should reference the field name: {msg}"
+        );
+
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("OPENAI_CODEX_API_URL");
+        }
+    }
+
+    /// Regression: SSRF validation on OPENAI_CODEX_AUTH_URL (#1103).
+    #[test]
+    fn openai_codex_rejects_ssrf_auth_url() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        clear_openai_codex_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::set_var("OPENAI_CODEX_AUTH_URL", "http://10.0.0.1");
+        }
+
+        let settings = Settings {
+            llm_backend: Some("openai_codex".to_string()),
+            ..Default::default()
+        };
+
+        let err = LlmConfig::resolve(&settings).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("OPENAI_CODEX_AUTH_URL"),
+            "error should reference the field name: {msg}"
+        );
+
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("OPENAI_CODEX_AUTH_URL");
+        }
     }
 }
