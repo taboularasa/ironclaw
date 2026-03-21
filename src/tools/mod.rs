@@ -26,13 +26,13 @@ pub use autonomy::{
     AUTONOMOUS_TOOL_DENYLIST, autonomous_allowed_tool_names, autonomous_unavailable_error,
     autonomous_unavailable_message, is_autonomous_tool_denylisted,
 };
-pub use executor::{PtcError, PtcToolResult, ToolExecutor};
 pub use builder::{
     BuildPhase, BuildRequirement, BuildResult, BuildSoftwareTool, BuilderConfig, Language,
     LlmSoftwareBuilder, SoftwareBuilder, SoftwareType, Template, TemplateEngine, TemplateType,
     TestCase, TestHarness, TestResult, TestSuite, ValidationError, ValidationResult, WasmValidator,
 };
 pub(crate) use coercion::prepare_tool_params;
+pub use executor::{PtcError, PtcToolResult, ToolExecutor};
 pub use rate_limiter::RateLimiter;
 pub use registry::ToolRegistry;
 pub use tool::{
