@@ -65,6 +65,9 @@ impl ThreadManager {
     ///
     /// Grants default capability leases for all registered capabilities.
     /// Returns the thread ID immediately; the thread runs in a background task.
+    ///
+    /// `initial_messages` provides conversation history from prior threads
+    /// (for context continuity across turns in the same conversation).
     pub async fn spawn_thread(
         &self,
         goal: impl Into<String>,
@@ -73,6 +76,30 @@ impl ThreadManager {
         config: ThreadConfig,
         parent_id: Option<ThreadId>,
         user_id: impl Into<String>,
+    ) -> Result<ThreadId, EngineError> {
+        self.spawn_thread_with_history(
+            goal,
+            thread_type,
+            project_id,
+            config,
+            parent_id,
+            user_id,
+            Vec::new(),
+        )
+        .await
+    }
+
+    /// Spawn a thread with initial conversation history.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn spawn_thread_with_history(
+        &self,
+        goal: impl Into<String>,
+        thread_type: ThreadType,
+        project_id: ProjectId,
+        config: ThreadConfig,
+        parent_id: Option<ThreadId>,
+        user_id: impl Into<String>,
+        initial_messages: Vec<crate::types::message::ThreadMessage>,
     ) -> Result<ThreadId, EngineError> {
         let mut thread = Thread::new(goal, thread_type, project_id, config);
         if let Some(pid) = parent_id {
@@ -95,7 +122,12 @@ impl ThreadManager {
             thread.capability_leases.push(lease.id);
         }
 
-        // Add the goal as the initial user message so the LLM has context
+        // Add conversation history from prior threads (for context continuity)
+        for msg in initial_messages {
+            thread.messages.push(msg);
+        }
+
+        // Add the goal as the current user message so the LLM has context
         thread.add_message(crate::types::message::ThreadMessage::user(&thread.goal));
 
         // Persist

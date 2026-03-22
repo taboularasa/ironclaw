@@ -112,16 +112,20 @@ impl ConversationManager {
                 Ok(thread_id)
             }
             None => {
-                // Spawn new foreground thread
+                // Build conversation history from prior entries for context continuity
+                let history = build_history_from_entries(&conv.entries);
+
+                // Spawn new foreground thread with conversation history
                 let thread_id = self
                     .thread_manager
-                    .spawn_thread(
+                    .spawn_thread_with_history(
                         content, // use message as goal
                         ThreadType::Foreground,
                         project_id,
                         thread_config,
                         None,
                         user_id,
+                        history,
                     )
                     .await?;
 
@@ -221,6 +225,38 @@ impl ConversationManager {
         }
         None
     }
+}
+
+/// Build ThreadMessage history from conversation entries.
+///
+/// Converts user and agent entries into ThreadMessages so a new thread
+/// inherits context from prior turns in the same conversation.
+fn build_history_from_entries(
+    entries: &[ConversationEntry],
+) -> Vec<crate::types::message::ThreadMessage> {
+    use crate::types::conversation::EntrySender;
+
+    // Skip the last entry (it's the current user message, added by the caller
+    // before this function runs). Also skip system entries (thread lifecycle
+    // notifications aren't useful as LLM context).
+    let history_entries = if entries.len() > 1 {
+        &entries[..entries.len() - 1]
+    } else {
+        return Vec::new();
+    };
+
+    history_entries
+        .iter()
+        .filter_map(|entry| match &entry.sender {
+            EntrySender::User => {
+                Some(crate::types::message::ThreadMessage::user(&entry.content))
+            }
+            EntrySender::Agent { .. } => {
+                Some(crate::types::message::ThreadMessage::assistant(&entry.content))
+            }
+            EntrySender::System => None, // skip system notifications
+        })
+        .collect()
 }
 
 #[cfg(test)]

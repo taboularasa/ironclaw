@@ -1,12 +1,13 @@
 //! Engine v2 router — handles user messages via the engine when enabled.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
+use tokio::sync::RwLock;
 use tracing::{debug, info};
 
 use ironclaw_engine::{
-    Capability, CapabilityRegistry, LeaseManager, PolicyEngine, Project, Store,
-    ThreadConfig, ThreadManager, ThreadOutcome, ThreadType,
+    Capability, CapabilityRegistry, ConversationManager, LeaseManager, PolicyEngine, Project,
+    Store, ThreadConfig, ThreadManager, ThreadOutcome,
 };
 
 use crate::agent::Agent;
@@ -23,24 +24,35 @@ pub fn is_engine_v2_enabled() -> bool {
         .unwrap_or(false)
 }
 
-/// Handle a user message through the engine v2 pipeline.
-///
-/// This is the engine-based equivalent of `Agent::process_user_input()`.
-/// It builds bridge adapters from the agent's existing dependencies,
-/// creates an engine `ThreadManager`, spawns a thread, and waits for
-/// the result.
-pub async fn handle_with_engine(
-    agent: &Agent,
-    message: &IncomingMessage,
-    content: &str,
-) -> Result<Option<String>, Error> {
-    info!(
-        user_id = %message.user_id,
-        channel = %message.channel,
-        "engine v2: handling message"
-    );
+/// Persistent engine state that lives across messages.
+struct EngineState {
+    thread_manager: Arc<ThreadManager>,
+    conversation_manager: ConversationManager,
+    #[allow(dead_code)]
+    store: Arc<InMemoryStore>,
+    default_project_id: ironclaw_engine::ProjectId,
+}
 
-    // Build bridge adapters from agent's existing dependencies
+/// Global engine state, initialized on first use.
+static ENGINE_STATE: OnceLock<RwLock<Option<EngineState>>> = OnceLock::new();
+
+/// Get or initialize the engine state using the agent's dependencies.
+async fn get_or_init_engine(agent: &Agent) -> Result<(), Error> {
+    let lock = ENGINE_STATE.get_or_init(|| RwLock::new(None));
+    let guard = lock.read().await;
+    if guard.is_some() {
+        return Ok(());
+    }
+    drop(guard);
+
+    // Initialize
+    let mut guard = lock.write().await;
+    if guard.is_some() {
+        return Ok(()); // double-check after acquiring write lock
+    }
+
+    info!("engine v2: initializing engine state");
+
     let llm_adapter = Arc::new(LlmBridgeAdapter::new(
         agent.llm().clone(),
         Some(agent.cheap_llm().clone()),
@@ -78,7 +90,6 @@ pub async fn handle_with_engine(
     let leases = Arc::new(LeaseManager::new());
     let policy = Arc::new(PolicyEngine::new());
 
-    // Create thread manager
     let thread_manager = Arc::new(ThreadManager::new(
         llm_adapter,
         effect_adapter,
@@ -88,11 +99,8 @@ pub async fn handle_with_engine(
         policy,
     ));
 
-    // Create a default project for this session
-    let project = Project::new(
-        format!("{}:{}", message.channel, message.user_id),
-        "Auto-created project",
-    );
+    // Create a default project
+    let project = Project::new("default", "Default project for engine v2");
     let project_id = project.id;
     store.save_project(&project).await.map_err(|e| {
         crate::error::Error::from(crate::error::JobError::ContextError {
@@ -101,63 +109,102 @@ pub async fn handle_with_engine(
         })
     })?;
 
-    // Spawn a thread for this message
-    let config = ThreadConfig::default();
-    let thread_id = thread_manager
-        .spawn_thread(
+    let conversation_manager = ConversationManager::new(Arc::clone(&thread_manager));
+
+    *guard = Some(EngineState {
+        thread_manager,
+        conversation_manager,
+        store: store.clone(),
+        default_project_id: project_id,
+    });
+
+    Ok(())
+}
+
+/// Handle a user message through the engine v2 pipeline.
+///
+/// Conversations and threads persist across messages within the same
+/// agent lifetime. Each (channel, user) pair gets a conversation;
+/// consecutive messages inject into the active thread or spawn a new one.
+pub async fn handle_with_engine(
+    agent: &Agent,
+    message: &IncomingMessage,
+    content: &str,
+) -> Result<Option<String>, Error> {
+    // Ensure engine is initialized
+    get_or_init_engine(agent).await?;
+
+    let lock = ENGINE_STATE.get().expect("engine initialized");
+    let guard = lock.read().await;
+    let state = guard.as_ref().expect("engine initialized");
+
+    info!(
+        user_id = %message.user_id,
+        channel = %message.channel,
+        "engine v2: handling message"
+    );
+
+    // Get or create conversation for this channel+user
+    let conv_id = state
+        .conversation_manager
+        .get_or_create_conversation(&message.channel, &message.user_id)
+        .await;
+
+    // Handle the message — spawns a new thread or injects into active one
+    let thread_id = state
+        .conversation_manager
+        .handle_user_message(
+            conv_id,
             content,
-            ThreadType::Foreground,
-            project_id,
-            config,
-            None,
+            state.default_project_id,
             &message.user_id,
+            ThreadConfig::default(),
         )
         .await
         .map_err(|e| {
             crate::error::Error::from(crate::error::JobError::ContextError {
                 id: uuid::Uuid::nil(),
-                reason: format!("engine v2 spawn error: {e}"),
+                reason: format!("engine v2 error: {e}"),
             })
         })?;
 
-    debug!(thread_id = %thread_id, "engine v2: thread spawned, waiting for completion");
+    debug!(thread_id = %thread_id, "engine v2: thread active, waiting for completion");
 
     // Wait for the thread to complete
-    let outcome = thread_manager.join_thread(thread_id).await.map_err(|e| {
-        crate::error::Error::from(crate::error::JobError::ContextError {
-            id: uuid::Uuid::nil(),
-            reason: format!("engine v2 join error: {e}"),
-        })
-    })?;
+    let outcome = state
+        .thread_manager
+        .join_thread(thread_id)
+        .await
+        .map_err(|e| {
+            crate::error::Error::from(crate::error::JobError::ContextError {
+                id: uuid::Uuid::nil(),
+                reason: format!("engine v2 join error: {e}"),
+            })
+        })?;
+
+    // Record outcome in conversation
+    state
+        .conversation_manager
+        .record_thread_outcome(conv_id, thread_id, &outcome)
+        .await;
 
     // Convert outcome to response
     match outcome {
         ThreadOutcome::Completed { response } => {
-            debug!(thread_id = %thread_id, "engine v2: thread completed");
+            debug!(thread_id = %thread_id, "engine v2: completed");
             Ok(response)
         }
-        ThreadOutcome::Stopped => {
-            debug!(thread_id = %thread_id, "engine v2: thread stopped");
-            Ok(Some("Thread was stopped.".into()))
-        }
+        ThreadOutcome::Stopped => Ok(Some("Thread was stopped.".into())),
         ThreadOutcome::MaxIterations => {
-            debug!(thread_id = %thread_id, "engine v2: max iterations");
             Ok(Some("Reached maximum iterations without completing.".into()))
         }
-        ThreadOutcome::Failed { error } => {
-            debug!(thread_id = %thread_id, error = %error, "engine v2: thread failed");
-            Ok(Some(format!("Error: {error}")))
-        }
+        ThreadOutcome::Failed { error } => Ok(Some(format!("Error: {error}"))),
         ThreadOutcome::NeedApproval {
             action_name,
             call_id: _,
             parameters: _,
-        } => {
-            // Phase 6: approval flow not yet wired — return as message
-            debug!(thread_id = %thread_id, action = %action_name, "engine v2: approval needed (not yet supported)");
-            Ok(Some(format!(
-                "Action '{action_name}' requires approval (engine v2 approval flow not yet implemented)"
-            )))
-        }
+        } => Ok(Some(format!(
+            "Action '{action_name}' requires approval (not yet supported in engine v2)"
+        ))),
     }
 }
