@@ -401,11 +401,43 @@ impl ExecutionLoop {
 
                     step.action_results = code_result.action_results;
 
-                    // Compact output metadata (RLM pattern: truncated, not full)
-                    let metadata = crate::executor::scripting::compact_output_metadata(
-                        &code_result.stdout,
-                        &code_result.return_value,
-                    );
+                    // Build comprehensive output for the LLM to see what happened.
+                    // Include stdout, tool results, and return value so the model
+                    // can reason about the outputs in the next iteration.
+                    let mut output_parts = Vec::new();
+                    if !code_result.stdout.is_empty() {
+                        output_parts.push(code_result.stdout.clone());
+                    }
+                    for result in &step.action_results {
+                        let output_str = serde_json::to_string(&result.output).unwrap_or_default();
+                        let truncated = if output_str.len() > 4000 {
+                            format!("{}... [truncated, {} total chars]", &output_str[..4000], output_str.len())
+                        } else {
+                            output_str
+                        };
+                        if result.is_error {
+                            output_parts.push(format!("[{} error] {}", result.action_name, truncated));
+                        } else {
+                            output_parts.push(format!("[{} result] {}", result.action_name, truncated));
+                        }
+                    }
+                    if code_result.return_value != serde_json::Value::Null {
+                        output_parts.push(format!(
+                            "[return] {}",
+                            serde_json::to_string_pretty(&code_result.return_value).unwrap_or_default()
+                        ));
+                    }
+                    let output_text = if output_parts.is_empty() {
+                        "[code executed, no output]".to_string()
+                    } else {
+                        output_parts.join("\n")
+                    };
+                    // Truncate total output to prevent context bloat
+                    let metadata = if output_text.len() > 8000 {
+                        format!("[TRUNCATED: last 8000 of {} chars]\n{}", output_text.len(), &output_text[output_text.len()-8000..])
+                    } else {
+                        output_text
+                    };
                     self.thread.add_message(ThreadMessage::system(metadata));
 
                     step.status = StepStatus::Completed;
