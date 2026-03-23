@@ -97,6 +97,10 @@ impl ExecutionLoop {
         let max_nudges = self.thread.config.max_tool_intent_nudges;
         let nudge_enabled = self.thread.config.enable_tool_intent_nudge;
         let start_time = std::time::Instant::now();
+
+        // Persisted state across code steps — accumulates return values
+        // and tool results so the next step can access them via `state`.
+        let mut persisted_state = serde_json::json!({});
         let mut nudge_count: u32 = 0;
         let mut consecutive_errors: u32 = 0;
         let mut compaction_count: u32 = 0;
@@ -423,7 +427,7 @@ impl ExecutionLoop {
                         step_id: step.id,
                     };
 
-                    // Execute via Monty
+                    // Execute via Monty with persisted state from prior steps
                     let code_result = crate::executor::scripting::execute_code(
                         &code,
                         &self.thread,
@@ -433,6 +437,7 @@ impl ExecutionLoop {
                         &self.policy,
                         &exec_ctx,
                         &[],
+                        &persisted_state,
                     )
                     .await?;
 
@@ -483,6 +488,17 @@ impl ExecutionLoop {
                     }
 
                     step.action_results = code_result.action_results;
+
+                    // Accumulate state for next step: return value + tool results.
+                    // This makes variables "persist" across code steps via `state`.
+                    if code_result.return_value != serde_json::Value::Null {
+                        persisted_state[format!("step_{}_return", self.thread.step_count)] =
+                            code_result.return_value.clone();
+                        persisted_state["last_return"] = code_result.return_value.clone();
+                    }
+                    for result in &step.action_results {
+                        persisted_state[&result.action_name] = result.output.clone();
+                    }
 
                     // Build comprehensive output for the LLM to see what happened.
                     // Include stdout, tool results, and return value so the model

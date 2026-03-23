@@ -61,7 +61,8 @@ You can write multiple code blocks across turns. Variables persist between block
 - `context` — List of prior conversation messages (each is a dict with 'role' and 'content')
 - `goal` — The current task description
 - `step_number` — Current execution step
-- `previous_results` — Dict of prior tool call results
+- `state` — Dict of persisted data from previous steps. Contains tool results keyed by tool name (e.g. `state['web_search']`) and return values (`state['last_return']`, `state['step_0_return']`). Use this to access data from previous steps without re-calling tools.
+- `previous_results` — Dict of prior tool call results (from ActionResult messages)
 
 ## Important rules
 

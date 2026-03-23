@@ -151,7 +151,13 @@ pub fn build_orientation_preamble(thread: &Thread) -> String {
 // ── Context injection (RLM 3.4) ────────────────────────────
 
 /// Build Monty input variables from thread state.
-fn build_context_inputs(thread: &Thread) -> (Vec<String>, Vec<MontyObject>) {
+///
+/// `persisted_state` carries variables from previous code steps so the
+/// REPL feels persistent even though each step creates a fresh MontyRun.
+fn build_context_inputs(
+    thread: &Thread,
+    persisted_state: &serde_json::Value,
+) -> (Vec<String>, Vec<MontyObject>) {
     let mut names = Vec::new();
     let mut values = Vec::new();
 
@@ -190,6 +196,12 @@ fn build_context_inputs(thread: &Thread) -> (Vec<String>, Vec<MontyObject>) {
     names.push("step_number".into());
     values.push(MontyObject::Int(thread.step_count as i64));
 
+    // `state` — persisted variables from previous code steps.
+    // This is a dict that accumulates: return values, tool results, etc.
+    // The model can read `state["results"]`, `state["prev_return"]`, etc.
+    names.push("state".into());
+    values.push(json_to_monty(persisted_state));
+
     // `previous_results` — dict of {call_id: result_json} from prior steps
     let result_pairs: Vec<(MontyObject, MontyObject)> = thread
         .messages
@@ -226,6 +238,7 @@ pub async fn execute_code(
     policy: &PolicyEngine,
     context: &ThreadExecutionContext,
     capability_policies: &[crate::types::capability::PolicyRule],
+    persisted_state: &serde_json::Value,
 ) -> Result<CodeExecutionResult, EngineError> {
     let mut stdout = String::new();
     let mut action_results = Vec::new();
@@ -234,8 +247,8 @@ pub async fn execute_code(
     let mut final_answer: Option<String> = None;
     let mut had_error = false;
 
-    // Build context variables (RLM 3.4)
-    let (input_names, input_values) = build_context_inputs(thread);
+    // Build context variables including persisted state from prior steps
+    let (input_names, input_values) = build_context_inputs(thread, persisted_state);
 
     // Parse and compile (wrap in catch_unwind — Monty 0.0.x can panic)
     let runner = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
