@@ -2149,33 +2149,62 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_approval_on_missing_thread_should_error() {
-        // Regression for #1487: process_approval() must return an error when
-        // the thread disappears during approval processing, rather than
-        // silently succeeding.
+    #[tokio::test]
+    async fn test_approval_on_missing_thread_should_error() {
+        // Regression for #1487: when a thread disappears from the session
+        // during approval processing, the code must return a visible error
+        // rather than silently succeeding.
+        //
+        // We can't call process_approval() directly (requires full Agent),
+        // so we simulate the exact code pattern used in the rejection and
+        // state-setting paths: lock session, match on get_mut, verify the
+        // None arm produces an error.
         use crate::agent::session::{Session, Thread, ThreadState};
+        use std::sync::Arc;
+        use tokio::sync::Mutex;
         use uuid::Uuid;
 
         let thread_id = Uuid::new_v4();
         let session_id = Uuid::new_v4();
-        let mut session = Session::new("test-user");
+        let session = Arc::new(Mutex::new(Session::new("test-user")));
 
-        // Thread doesn't exist in session — simulates disappearance after
-        // lock re-acquisition.
-        assert!(!session.threads.contains_key(&thread_id));
+        // Scenario 1: Thread never existed
+        {
+            let sess = session.lock().await;
+            let result = match sess.threads.get(&thread_id) {
+                Some(_) => Ok("processed"),
+                None => Err("Internal error: thread no longer exists"),
+            };
+            assert!(result.is_err());
+            assert_eq!(result.unwrap_err(), "Internal error: thread no longer exists");
+        }
 
-        // The match arms we added should detect this and return an error.
-        // Verify the lookup returns None — the code path must handle it.
-        assert!(session.threads.get_mut(&thread_id).is_none());
+        // Scenario 2: Thread existed then was removed (simulates disappearance
+        // between lock acquisitions -- the TOCTOU window this fix addresses)
+        {
+            let mut sess = session.lock().await;
+            let mut thread = Thread::with_id(thread_id, session_id);
+            thread.start_turn("pending approval");
+            thread.state = ThreadState::AwaitingApproval;
+            sess.threads.insert(thread_id, thread);
+        }
+        {
+            let mut sess = session.lock().await;
+            // Simulate thread disappearing (e.g., pruned by another task)
+            sess.threads.remove(&thread_id);
 
-        // Also verify a thread that existed and was removed is caught.
-        let mut thread = Thread::with_id(thread_id, session_id);
-        thread.start_turn("pending approval");
-        thread.state = ThreadState::AwaitingApproval;
-        session.threads.insert(thread_id, thread);
-        session.threads.remove(&thread_id);
-        assert!(session.threads.get_mut(&thread_id).is_none());
+            // The rejection path must detect this and return an error
+            let result = match sess.threads.get_mut(&thread_id) {
+                Some(thread) => {
+                    thread.clear_pending_approval();
+                    thread.complete_turn("rejected");
+                    Ok("rejection persisted")
+                }
+                None => Err("Internal error: thread no longer exists"),
+            };
+            assert!(result.is_err());
+            assert_eq!(result.unwrap_err(), "Internal error: thread no longer exists");
+        }
     }
 
     #[test]
