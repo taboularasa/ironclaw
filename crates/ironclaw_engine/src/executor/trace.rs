@@ -33,7 +33,23 @@ pub struct ExecutionTrace {
     pub messages: Vec<MessageRecord>,
     pub events: Vec<ThreadEvent>,
     pub issues: Vec<TraceIssue>,
+    pub reflection: Option<ReflectionTrace>,
     pub timestamp: chrono::DateTime<Utc>,
+}
+
+/// Reflection results captured in the trace.
+#[derive(Debug, Serialize)]
+pub struct ReflectionTrace {
+    pub docs: Vec<ReflectionDocRecord>,
+    pub tokens_used: u64,
+}
+
+/// A single doc produced by reflection, for the trace.
+#[derive(Debug, Serialize)]
+pub struct ReflectionDocRecord {
+    pub doc_type: String,
+    pub title: String,
+    pub content: String,
 }
 
 /// A message in the trace with role labeling.
@@ -96,6 +112,7 @@ pub fn build_trace(thread: &Thread) -> ExecutionTrace {
         messages,
         events: thread.events.clone(),
         issues,
+        reflection: None,
         timestamp: Utc::now(),
     }
 }
@@ -124,6 +141,22 @@ pub fn write_trace(trace: &ExecutionTrace) -> Option<PathBuf> {
             None
         }
     }
+}
+
+/// Attach reflection results to a trace.
+pub fn attach_reflection(trace: &mut ExecutionTrace, result: &crate::reflection::ReflectionResult) {
+    trace.reflection = Some(ReflectionTrace {
+        docs: result
+            .docs
+            .iter()
+            .map(|d| ReflectionDocRecord {
+                doc_type: format!("{:?}", d.doc_type),
+                title: d.title.clone(),
+                content: d.content.clone(),
+            })
+            .collect(),
+        tokens_used: result.tokens_used.total(),
+    });
 }
 
 /// Print a summary of the trace to the log.
@@ -160,6 +193,24 @@ pub fn log_trace_summary(trace: &ExecutionTrace) {
                 "NOTE: {}",
                 issue.description
             ),
+        }
+    }
+
+    if let Some(ref refl) = trace.reflection {
+        info!(
+            thread_id = %trace.thread_id,
+            docs = refl.docs.len(),
+            tokens = refl.tokens_used,
+            "=== Reflection ==="
+        );
+        for doc in &refl.docs {
+            let preview: String = doc.content.chars().take(200).collect();
+            let truncated = if doc.content.len() > 200 { "..." } else { "" };
+            info!(
+                doc_type = %doc.doc_type,
+                title = %doc.title,
+                "  {preview}{truncated}"
+            );
         }
     }
 }
@@ -241,14 +292,14 @@ fn analyze_trace(thread: &Thread) -> Vec<TraceIssue> {
         .messages
         .iter()
         .any(|m| m.role == crate::types::message::MessageRole::ActionResult);
-    let has_tool_result_system_msg = thread
+    // Check if tool outputs are visible in the message history (any role).
+    // The engine adds tool results as system messages with "[tool_name result]"
+    // or "[tool_name error]" prefixes.
+    let has_tool_output_in_messages = thread
         .messages
         .iter()
-        .any(|m| {
-            m.role == crate::types::message::MessageRole::System
-                && m.content.contains("[") && m.content.contains("result]")
-        });
-    if has_tool_results && !has_tool_result_system_msg {
+        .any(|m| m.content.contains(" result]") || m.content.contains(" error]"));
+    if has_tool_results && !has_tool_output_in_messages {
         issues.push(TraceIssue {
             severity: IssueSeverity::Warning,
             category: "missing_tool_output".into(),
