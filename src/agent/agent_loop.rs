@@ -10,7 +10,6 @@
 use std::sync::Arc;
 
 use futures::StreamExt;
-use uuid::Uuid;
 
 use crate::agent::context_monitor::ContextMonitor;
 use crate::agent::heartbeat::spawn_heartbeat;
@@ -1005,22 +1004,21 @@ impl Agent {
 
         // Hydrate thread from DB if it's a historical thread not in memory.
         // Capture the parsed UUID to avoid redundant re-parsing downstream.
-        let mut parsed_thread_uuid: Option<Uuid> = None;
-        if let Some(external_thread_id) = message.conversation_scope() {
+        let parsed_thread_uuid = if let Some(external_thread_id) = message.conversation_scope() {
             tracing::trace!(
                 message_id = %message.id,
                 thread_id = %external_thread_id,
                 "Hydrating thread from DB"
             );
             match self.maybe_hydrate_thread(message, external_thread_id).await {
-                Ok(uuid) => {
-                    parsed_thread_uuid = uuid;
-                }
+                Ok(uuid) => uuid,
                 Err(rejection) => {
                     return Ok(Some(format!("Error: {}", rejection)));
                 }
             }
-        }
+        } else {
+            None
+        };
 
         // Resolve session and thread. Approval submissions are allowed to
         // target an already-loaded owned thread by UUID across channels so the
