@@ -29,7 +29,7 @@ pub struct UserIdentity {
 }
 
 /// Hash a token with SHA-256 for constant-size, timing-safe storage.
-fn hash_token(token: &str) -> [u8; 32] {
+pub fn hash_token(token: &str) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(token.as_bytes());
     hasher.finalize().into()
