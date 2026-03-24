@@ -785,6 +785,7 @@ mod tests {
             auto_approve_tools: true,
             default_timezone: "UTC".to_string(),
             max_tokens_per_job,
+            multi_tenant: false,
         };
         let cm = Arc::new(ContextManager::new(5));
         let llm: Arc<dyn LlmProvider> = Arc::new(StubLlm);

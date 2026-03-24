@@ -572,6 +572,23 @@ pub fn spawn_multi_user_heartbeat(
             for user_id in &user_ids {
                 let workspace = Arc::new(Workspace::new_with_db(user_id, store.clone()));
 
+                // Run memory hygiene per user (same as single-user heartbeat).
+                let hygiene_ws = Arc::clone(&workspace);
+                let hygiene_cfg = hygiene_config.clone();
+                let hygiene_user = user_id.clone();
+                tokio::spawn(async move {
+                    let report =
+                        crate::workspace::hygiene::run_if_due(&hygiene_ws, &hygiene_cfg).await;
+                    if report.had_work() {
+                        tracing::info!(
+                            user_id = hygiene_user,
+                            daily_logs_deleted = report.daily_logs_deleted,
+                            conversation_docs_deleted = report.conversation_docs_deleted,
+                            "multi-user heartbeat: memory hygiene deleted stale documents"
+                        );
+                    }
+                });
+
                 let mut runner = HeartbeatRunner::new(
                     config.clone(),
                     hygiene_config.clone(),

@@ -663,19 +663,32 @@ impl Agent {
                         }
                     }
 
-                    match self.llm().set_model(requested) {
-                        Ok(()) => {
-                            // Persist the model choice so it survives restarts.
-                            self.persist_selected_model(requested).await;
-                            Ok(SubmissionResult::response(format!(
-                                "Switched model to: {}",
-                                requested
-                            )))
+                    if self.config.multi_tenant {
+                        // Multi-tenant: only persist to per-user settings.
+                        // Do NOT call set_model() on the shared provider — that
+                        // would change the default for all users. The per-request
+                        // model_override in the dispatcher reads from the same
+                        // "selected_model" setting and applies it per-user.
+                        self.persist_selected_model(requested).await;
+                        Ok(SubmissionResult::response(format!(
+                            "Model preference set to: {} (per-user)",
+                            requested
+                        )))
+                    } else {
+                        match self.llm().set_model(requested) {
+                            Ok(()) => {
+                                // Persist the model choice so it survives restarts.
+                                self.persist_selected_model(requested).await;
+                                Ok(SubmissionResult::response(format!(
+                                    "Switched model to: {}",
+                                    requested
+                                )))
+                            }
+                            Err(e) => Ok(SubmissionResult::error(format!(
+                                "Failed to switch model: {}",
+                                e
+                            ))),
                         }
-                        Err(e) => Ok(SubmissionResult::error(format!(
-                            "Failed to switch model: {}",
-                            e
-                        ))),
                     }
                 }
             }

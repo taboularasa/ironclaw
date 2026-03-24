@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use crate::config::helpers::{parse_bool_env, parse_option_env, parse_optional_env};
+use crate::config::helpers::{optional_env, parse_bool_env, parse_option_env, parse_optional_env};
 use crate::error::ConfigError;
 use crate::settings::Settings;
 
@@ -33,6 +33,9 @@ pub struct AgentConfig {
     pub default_timezone: String,
     /// Maximum tokens per job (0 = unlimited).
     pub max_tokens_per_job: u64,
+    /// Whether the deployment is multi-tenant (multiple users sharing one
+    /// instance). Auto-detected from GATEWAY_USER_TOKENS presence.
+    pub multi_tenant: bool,
 }
 
 impl AgentConfig {
@@ -56,6 +59,7 @@ impl AgentConfig {
             auto_approve_tools: true,
             default_timezone: "UTC".to_string(),
             max_tokens_per_job: 0,
+            multi_tenant: false,
         }
     }
 
@@ -115,6 +119,10 @@ impl AgentConfig {
             max_tokens_per_job: parse_optional_env(
                 "AGENT_MAX_TOKENS_PER_JOB",
                 settings.agent.max_tokens_per_job,
+            )?,
+            multi_tenant: parse_bool_env(
+                "MULTI_TENANT",
+                optional_env("GATEWAY_USER_TOKENS")?.is_some(),
             )?,
         })
     }
