@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 use chrono::Utc;
 use serde::Serialize;
-use tracing::{info, warn};
+use tracing::{debug, warn};
 
 use crate::types::event::ThreadEvent;
 use crate::types::thread::{Thread, ThreadId, ThreadState};
@@ -125,7 +125,7 @@ pub fn write_trace(trace: &ExecutionTrace) -> Option<PathBuf> {
     match serde_json::to_string_pretty(trace) {
         Ok(json) => match std::fs::write(&path, json) {
             Ok(()) => {
-                info!(path = %path.display(), "Execution trace written");
+                debug!(path = %path.display(), "Execution trace written");
                 Some(path)
             }
             Err(e) => {
@@ -158,7 +158,7 @@ pub fn attach_reflection(trace: &mut ExecutionTrace, result: &crate::reflection:
 
 /// Print a summary of the trace to the log.
 pub fn log_trace_summary(trace: &ExecutionTrace) {
-    info!(
+    debug!(
         thread_id = %trace.thread_id,
         goal = %trace.goal,
         state = ?trace.final_state,
@@ -184,7 +184,7 @@ pub fn log_trace_summary(trace: &ExecutionTrace) {
                 "WARNING: {}",
                 issue.description
             ),
-            IssueSeverity::Info => info!(
+            IssueSeverity::Info => debug!(
                 category = %issue.category,
                 step = ?issue.step,
                 "NOTE: {}",
@@ -194,7 +194,7 @@ pub fn log_trace_summary(trace: &ExecutionTrace) {
     }
 
     if let Some(ref refl) = trace.reflection {
-        info!(
+        debug!(
             thread_id = %trace.thread_id,
             docs = refl.docs.len(),
             tokens = refl.tokens_used,
@@ -207,7 +207,7 @@ pub fn log_trace_summary(trace: &ExecutionTrace) {
             } else {
                 ""
             };
-            info!(
+            debug!(
                 doc_type = %doc.doc_type,
                 title = %doc.title,
                 "  {preview}{truncated}"
