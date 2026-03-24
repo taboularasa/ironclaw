@@ -290,6 +290,8 @@ mod tests {
         Arc::new(ExtensionManager::new(
             Arc::new(McpSessionManager::new()),
             Arc::new(McpProcessManager::new()),
+            None,
+            None,
             secrets,
             tools,
             None,
@@ -298,6 +300,7 @@ mod tests {
             tools_dir.join("channels"),
             None,
             owner_id.to_string(),
+            None,
             None,
             Vec::new(),
         ))

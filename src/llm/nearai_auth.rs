@@ -74,6 +74,7 @@ mod tests {
         }
     }
 
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn test_resolve_bearer_token_if_available_uses_runtime_env_override() {
         let _guard = ENV_MUTEX.lock().expect("env mutex");

@@ -6426,6 +6426,7 @@ mod tests {
         );
     }
 
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn test_runtime_auth_detects_runtime_nearai_api_key_override() {
         struct EnvGuard(&'static str, Option<String>);

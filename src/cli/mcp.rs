@@ -862,6 +862,7 @@ mod tests {
     }
 
     #[cfg(feature = "libsql")]
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn test_resolve_llm_for_cli_uses_db_backed_selected_model() {
         struct MockSettingsStore {
