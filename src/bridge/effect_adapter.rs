@@ -153,7 +153,7 @@ impl EffectExecutor for EffectBridgeAdapter {
             &self.tools,
             &self.safety,
             lookup_name,
-            &parameters,
+            parameters.clone(),
             &job_ctx,
         )
         .await;
