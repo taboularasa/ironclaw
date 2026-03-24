@@ -84,7 +84,8 @@ impl EffectBridgeAdapter {
         let mgr = mgr.as_ref()?;
 
         let result = match action_name {
-            "mission_create" => {
+            // routine_create maps to mission_create in v2
+            "mission_create" | "routine_create" => {
                 let name = params
                     .get("name")
                     .or_else(|| params.get("_args").and_then(|a| a.get(0)))
@@ -110,7 +111,7 @@ impl EffectBridgeAdapter {
                     Err(e) => Err(e),
                 }
             }
-            "mission_list" => match mgr.list_missions(context.project_id).await {
+            "mission_list" | "routine_list" => match mgr.list_missions(context.project_id).await {
                 Ok(missions) => {
                     let list: Vec<serde_json::Value> = missions
                         .iter()
@@ -129,7 +130,7 @@ impl EffectBridgeAdapter {
                 }
                 Err(e) => Err(e),
             },
-            "mission_fire" => {
+            "mission_fire" | "routine_fire" => {
                 let id_str = params
                     .get("id")
                     .or_else(|| params.get("_args").and_then(|a| a.get(0)))
@@ -153,7 +154,8 @@ impl EffectBridgeAdapter {
                     Err(e) => Err(e),
                 }
             }
-            "mission_pause" | "mission_resume" => {
+            "mission_pause" | "mission_resume" | "routine_pause" | "routine_resume"
+            | "routine_update" => {
                 let id_str = params
                     .get("id")
                     .or_else(|| params.get("_args").and_then(|a| a.get(0)))
@@ -166,11 +168,12 @@ impl EffectBridgeAdapter {
                     });
                 match id {
                     Ok(id) => {
-                        let res = if action_name == "mission_pause" {
-                            mgr.pause_mission(id).await
-                        } else {
-                            mgr.resume_mission(id).await
-                        };
+                        let res =
+                            if action_name == "mission_pause" || action_name == "routine_pause" {
+                                mgr.pause_mission(id).await
+                            } else {
+                                mgr.resume_mission(id).await
+                            };
                         match res {
                             Ok(()) => Ok(serde_json::json!({"status": "ok"})),
                             Err(e) => Err(e),
@@ -179,7 +182,27 @@ impl EffectBridgeAdapter {
                     Err(e) => Err(e),
                 }
             }
-            _ => return None, // Not a mission call
+            "routine_delete" | "mission_delete" => {
+                let id_str = params
+                    .get("id")
+                    .or_else(|| params.get("name")) // routine_delete uses "name" param
+                    .or_else(|| params.get("_args").and_then(|a| a.get(0)))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let id = uuid::Uuid::parse_str(id_str)
+                    .map(ironclaw_engine::MissionId)
+                    .map_err(|e| EngineError::Effect {
+                        reason: format!("invalid mission id: {e}"),
+                    });
+                match id {
+                    Ok(id) => match mgr.complete_mission(id).await {
+                        Ok(()) => Ok(serde_json::json!({"status": "deleted"})),
+                        Err(e) => Err(e),
+                    },
+                    Err(e) => Err(e),
+                }
+            }
+            _ => return None, // Not a mission/routine call
         };
 
         Some(match result {
@@ -479,18 +502,12 @@ fn parse_cadence(s: &str) -> ironclaw_engine::types::mission::MissionCadence {
 
 /// Tools that depend on v1 runtime components (RoutineEngine, Scheduler,
 /// ContainerJobManager) and cannot work in engine v2's minimal JobContext.
+/// Tools that depend on v1 runtime components and can't work in engine v2.
+/// Note: routine_* tools are NOT blocked — they map to mission operations.
 fn is_v1_only_tool(name: &str) -> bool {
     matches!(
         name,
-        "routine_create"
-            | "routine-create"
-            | "routine_update"
-            | "routine-update"
-            | "routine_delete"
-            | "routine-delete"
-            | "routine_fire"
-            | "routine-fire"
-            | "create_job"
+        "create_job"
             | "create-job"
             | "cancel_job"
             | "cancel-job"
