@@ -38,7 +38,8 @@ CREATE TABLE IF NOT EXISTS conversations (
     thread_id TEXT,
     started_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     last_activity TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-    metadata TEXT NOT NULL DEFAULT '{}'
+    metadata TEXT NOT NULL DEFAULT '{}',
+    source_channel TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_conversations_channel ON conversations(channel);
@@ -723,6 +724,14 @@ CREATE INDEX IF NOT EXISTS idx_routines_event_triggers
     WHERE enabled = 1 AND trigger_type IN ('event', 'system_event');
 
 PRAGMA foreign_keys=ON;
+"#,
+    ),
+    (
+        14,
+        "conversation_source_channel",
+        // Add source_channel to conversations for cross-channel approval authorization.
+        r#"
+ALTER TABLE conversations ADD COLUMN source_channel TEXT;
 "#,
     ),
 ];
