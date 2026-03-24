@@ -120,10 +120,9 @@ impl AgentConfig {
                 "AGENT_MAX_TOKENS_PER_JOB",
                 settings.agent.max_tokens_per_job,
             )?,
-            multi_tenant: parse_bool_env(
-                "MULTI_TENANT",
-                optional_env("GATEWAY_USER_TOKENS")?.is_some(),
-            )?,
+            // Auto-detected from GATEWAY_USER_TOKENS presence. Not a separate
+            // knob — multi-tenant mode is always implied by configuring user tokens.
+            multi_tenant: optional_env("GATEWAY_USER_TOKENS")?.is_some(),
         })
     }
 }

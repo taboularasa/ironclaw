@@ -544,6 +544,8 @@ impl Agent {
                             // In multi-tenant mode, extract the owning user_id from
                             // the response metadata so notifications reach the
                             // correct user rather than the agent's owner.
+                            // This intentionally overrides the configured notify_target
+                            // because each user's heartbeat should notify that user.
                             let effective_user = if is_multi_tenant {
                                 response
                                     .metadata

@@ -737,12 +737,19 @@ impl RoutineEngine {
             });
         }
 
+        // Per-user workspace (same pattern as spawn_fire).
+        let routine_workspace = if routine.user_id == self.workspace.user_id() {
+            self.workspace.clone()
+        } else {
+            Arc::new(Workspace::new_with_db(&routine.user_id, self.store.clone()))
+        };
+
         // Execute inline for manual triggers (caller wants to wait)
         let engine = EngineContext {
             config: self.config.clone(),
             store: self.store.clone(),
             llm: self.llm.clone(),
-            workspace: self.workspace.clone(),
+            workspace: routine_workspace,
             notify_tx: self.notify_tx.clone(),
             running_count: self.running_count.clone(),
             scheduler: self.scheduler.clone(),

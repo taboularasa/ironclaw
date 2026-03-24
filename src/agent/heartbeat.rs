@@ -574,8 +574,9 @@ pub fn spawn_multi_user_heartbeat(
                 }
             };
 
-            // Run all user heartbeats concurrently so one slow LLM call
-            // doesn't block others.
+            // Run user heartbeats concurrently so one slow LLM call doesn't
+            // block others. Cap concurrency to avoid flooding the LLM provider.
+            const MAX_CONCURRENT_HEARTBEATS: usize = 8;
             let mut join_set = tokio::task::JoinSet::new();
 
             for user_id in &user_ids {
@@ -604,6 +605,13 @@ pub fn spawn_multi_user_heartbeat(
                     }
                 });
 
+                // Drain completed tasks to stay within the concurrency cap.
+                while join_set.len() >= MAX_CONCURRENT_HEARTBEATS {
+                    if let Some(join_result) = join_set.join_next().await {
+                        collect_heartbeat_result(join_result, &mut user_failures, &config);
+                    }
+                }
+
                 let uid = user_id.clone();
                 let cfg = config.clone();
                 let hyg = hygiene_config.clone();
@@ -626,46 +634,55 @@ pub fn spawn_multi_user_heartbeat(
                 });
             }
 
-            // Collect results and update failure counts
+            // Collect remaining results and update failure counts
             while let Some(join_result) = join_set.join_next().await {
-                let (uid, result) = match join_result {
-                    Ok(pair) => pair,
-                    Err(e) => {
-                        tracing::error!("Multi-user heartbeat task panicked: {}", e);
-                        continue;
-                    }
-                };
-                match result {
-                    HeartbeatResult::Ok => {
-                        tracing::trace!(user_id = uid, "Multi-user heartbeat OK");
-                        user_failures.remove(&uid);
-                    }
-                    HeartbeatResult::NeedsAttention(_) => {
-                        tracing::info!(user_id = uid, "Multi-user heartbeat needs attention");
-                        user_failures.remove(&uid);
-                    }
-                    HeartbeatResult::Skipped => {}
-                    HeartbeatResult::Failed(err) => {
-                        let count = user_failures.entry(uid.clone()).or_insert(0);
-                        *count += 1;
-                        tracing::error!(
-                            user_id = uid,
-                            consecutive_failures = *count,
-                            "Multi-user heartbeat failed: {}",
-                            err
-                        );
-                        if *count >= config.max_failures {
-                            tracing::error!(
-                                user_id = uid,
-                                "Multi-user heartbeat disabled for user after {} consecutive failures",
-                                count
-                            );
-                        }
-                    }
-                }
+                collect_heartbeat_result(join_result, &mut user_failures, &config);
             }
         }
     })
+}
+
+/// Process a single JoinSet result from the multi-user heartbeat loop.
+fn collect_heartbeat_result(
+    join_result: Result<(String, HeartbeatResult), tokio::task::JoinError>,
+    user_failures: &mut std::collections::HashMap<String, u32>,
+    config: &HeartbeatConfig,
+) {
+    let (uid, result) = match join_result {
+        Ok(pair) => pair,
+        Err(e) => {
+            tracing::error!("Multi-user heartbeat task panicked: {}", e);
+            return;
+        }
+    };
+    match result {
+        HeartbeatResult::Ok => {
+            tracing::trace!(user_id = uid, "Multi-user heartbeat OK");
+            user_failures.remove(&uid);
+        }
+        HeartbeatResult::NeedsAttention(_) => {
+            tracing::info!(user_id = uid, "Multi-user heartbeat needs attention");
+            user_failures.remove(&uid);
+        }
+        HeartbeatResult::Skipped => {}
+        HeartbeatResult::Failed(err) => {
+            let count = user_failures.entry(uid.clone()).or_insert(0);
+            *count += 1;
+            tracing::error!(
+                user_id = uid,
+                consecutive_failures = *count,
+                "Multi-user heartbeat failed: {}",
+                err
+            );
+            if *count >= config.max_failures {
+                tracing::error!(
+                    user_id = uid,
+                    "Multi-user heartbeat disabled for user after {} consecutive failures",
+                    count
+                );
+            }
+        }
+    }
 }
 
 #[cfg(test)]

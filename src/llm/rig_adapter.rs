@@ -599,11 +599,12 @@ fn build_rig_request(
 
 /// Inject a per-request model override into the rig request's `additional_params`.
 ///
-/// Rig-core bakes the model name at construction time. For OpenAI, Anthropic, and
-/// Ollama, the `model` field in the request body determines which model serves the
-/// request. Rig-core's `#[serde(flatten)]` on `additional_params` emits these fields
-/// AFTER the struct's own `model` field. Most API servers (Python, Go) use
-/// last-key-wins when deserializing duplicate JSON keys, so the override takes effect.
+/// Rig-core bakes the model name at construction time inside each provider's
+/// `CompletionModel` implementation. The actual HTTP request body includes a
+/// `model` field set by the provider. Rig-core's `#[serde(flatten)]` on
+/// `additional_params` emits these fields AFTER the provider's own fields.
+/// Most API servers (Python, Go) use last-key-wins when deserializing
+/// duplicate JSON keys, so the injected `model` value takes effect.
 fn inject_model_override(rig_req: &mut RigRequest, model_override: Option<&str>) {
     let Some(model) = model_override else {
         return;
