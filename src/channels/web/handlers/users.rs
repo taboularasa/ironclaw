@@ -9,14 +9,14 @@ use axum::{
 };
 use uuid::Uuid;
 
-use crate::channels::web::auth::AuthenticatedUser;
+use crate::channels::web::auth::{AdminUser, AuthenticatedUser};
 use crate::channels::web::server::GatewayState;
 use crate::db::UserRecord;
 
 /// POST /api/admin/users — create a new user.
 pub async fn users_create_handler(
     State(state): State<Arc<GatewayState>>,
-    AuthenticatedUser(user): AuthenticatedUser,
+    AdminUser(user): AdminUser,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let store = state.store.as_ref().ok_or((
@@ -34,6 +34,17 @@ pub async fn users_create_handler(
         .to_string();
 
     let email = body.get("email").and_then(|v| v.as_str()).map(String::from);
+    let role = body
+        .get("role")
+        .and_then(|v| v.as_str())
+        .unwrap_or("member")
+        .to_string();
+    if role != "admin" && role != "member" {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "role must be 'admin' or 'member'".to_string(),
+        ));
+    }
 
     let user_id = Uuid::new_v4().to_string();
 
@@ -43,6 +54,7 @@ pub async fn users_create_handler(
         email,
         display_name: display_name.clone(),
         status: "active".to_string(),
+        role,
         created_at: now,
         updated_at: now,
         last_login_at: None,
@@ -60,6 +72,7 @@ pub async fn users_create_handler(
         "email": user_record.email,
         "display_name": user_record.display_name,
         "status": user_record.status,
+        "role": user_record.role,
         "created_at": user_record.created_at.to_rfc3339(),
         "created_by": user_record.created_by,
     })))
@@ -88,6 +101,7 @@ pub async fn users_list_handler(
                 "email": u.email,
                 "display_name": u.display_name,
                 "status": u.status,
+                "role": u.role,
                 "created_at": u.created_at.to_rfc3339(),
                 "updated_at": u.updated_at.to_rfc3339(),
                 "last_login_at": u.last_login_at.map(|dt| dt.to_rfc3339()),
@@ -121,6 +135,7 @@ pub async fn users_detail_handler(
         "email": user_record.email,
         "display_name": user_record.display_name,
         "status": user_record.status,
+        "role": user_record.role,
         "created_at": user_record.created_at.to_rfc3339(),
         "updated_at": user_record.updated_at.to_rfc3339(),
         "last_login_at": user_record.last_login_at.map(|dt| dt.to_rfc3339()),
@@ -172,6 +187,7 @@ pub async fn users_update_handler(
         "email": updated.email,
         "display_name": updated.display_name,
         "status": updated.status,
+        "role": updated.role,
         "created_at": updated.created_at.to_rfc3339(),
         "updated_at": updated.updated_at.to_rfc3339(),
         "metadata": updated.metadata,

@@ -8,14 +8,14 @@ use rand::rngs::OsRng;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use crate::channels::web::auth::AuthenticatedUser;
+use crate::channels::web::auth::{AdminUser, AuthenticatedUser};
 use crate::channels::web::server::GatewayState;
 use crate::db::{InvitationRecord, UserRecord};
 
-/// POST /api/invitations — create an invitation.
+/// POST /api/invitations — create an invitation (admin only).
 pub async fn invitations_create_handler(
     State(state): State<Arc<GatewayState>>,
-    AuthenticatedUser(user): AuthenticatedUser,
+    AdminUser(user): AdminUser,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let store = state.store.as_ref().ok_or((
@@ -170,6 +170,7 @@ pub async fn invitations_accept_handler(
         email: invitation.email.clone(),
         display_name: display_name.clone(),
         status: "active".to_string(),
+        role: "member".to_string(),
         created_at: now,
         updated_at: now,
         last_login_at: None,

@@ -2291,14 +2291,15 @@ impl Store {
         let conn = self.conn().await?;
         conn.execute(
             r#"
-            INSERT INTO users (id, email, display_name, status, created_at, updated_at, last_login_at, created_by, metadata)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            INSERT INTO users (id, email, display_name, status, role, created_at, updated_at, last_login_at, created_by, metadata)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
             "#,
             &[
                 &user.id,
                 &user.email,
                 &user.display_name,
                 &user.status,
+                &user.role,
                 &user.created_at,
                 &user.updated_at,
                 &user.last_login_at,
@@ -2314,7 +2315,7 @@ impl Store {
     pub async fn get_user(&self, id: &str) -> Result<Option<UserRecord>, DatabaseError> {
         let conn = self.conn().await?;
         let row = conn
-            .query_opt("SELECT id, email, display_name, status, created_at, updated_at, last_login_at, created_by, metadata FROM users WHERE id = $1", &[&id])
+            .query_opt("SELECT id, email, display_name, status, role, created_at, updated_at, last_login_at, created_by, metadata FROM users WHERE id = $1", &[&id])
             .await?;
         Ok(row.map(|r| row_to_user(&r)))
     }
@@ -2326,7 +2327,7 @@ impl Store {
     ) -> Result<Option<UserRecord>, DatabaseError> {
         let conn = self.conn().await?;
         let row = conn
-            .query_opt("SELECT id, email, display_name, status, created_at, updated_at, last_login_at, created_by, metadata FROM users WHERE email = $1", &[&email])
+            .query_opt("SELECT id, email, display_name, status, role, created_at, updated_at, last_login_at, created_by, metadata FROM users WHERE email = $1", &[&email])
             .await?;
         Ok(row.map(|r| row_to_user(&r)))
     }
@@ -2337,13 +2338,13 @@ impl Store {
         let rows = match status {
             Some(s) => {
                 conn.query(
-                    "SELECT id, email, display_name, status, created_at, updated_at, last_login_at, created_by, metadata FROM users WHERE status = $1 ORDER BY created_at DESC",
+                    "SELECT id, email, display_name, status, role, created_at, updated_at, last_login_at, created_by, metadata FROM users WHERE status = $1 ORDER BY created_at DESC",
                     &[&s],
                 )
                 .await?
             }
             None => {
-                conn.query("SELECT id, email, display_name, status, created_at, updated_at, last_login_at, created_by, metadata FROM users ORDER BY created_at DESC", &[])
+                conn.query("SELECT id, email, display_name, status, role, created_at, updated_at, last_login_at, created_by, metadata FROM users ORDER BY created_at DESC", &[])
                     .await?
             }
         };
@@ -2475,7 +2476,7 @@ impl Store {
             .query_opt(
                 r#"
                 SELECT t.id, t.user_id, t.name, t.token_prefix, t.expires_at, t.last_used_at, t.created_at, t.revoked_at,
-                       u.id as u_id, u.email, u.display_name, u.status, u.created_at as u_created_at, u.updated_at, u.last_login_at, u.created_by, u.metadata
+                       u.id as u_id, u.email, u.display_name, u.status, u.role, u.created_at as u_created_at, u.updated_at, u.last_login_at, u.created_by, u.metadata
                 FROM api_tokens t
                 JOIN users u ON t.user_id = u.id
                 WHERE t.token_hash = $1
@@ -2502,6 +2503,7 @@ impl Store {
                 email: r.get("email"),
                 display_name: r.get("display_name"),
                 status: r.get("status"),
+                role: r.get("role"),
                 created_at: r.get("u_created_at"),
                 updated_at: r.get("updated_at"),
                 last_login_at: r.get("last_login_at"),
@@ -2639,6 +2641,7 @@ fn row_to_user(row: &tokio_postgres::Row) -> UserRecord {
         email: row.get("email"),
         display_name: row.get("display_name"),
         status: row.get("status"),
+        role: row.get("role"),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
         last_login_at: row.get("last_login_at"),

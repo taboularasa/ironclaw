@@ -24,6 +24,8 @@ use crate::db::Database;
 #[derive(Debug, Clone)]
 pub struct UserIdentity {
     pub user_id: String,
+    /// `admin` or `member`.
+    pub role: String,
     /// Additional user scopes this identity can read from.
     pub workspace_read_scopes: Vec<String>,
 }
@@ -61,6 +63,7 @@ impl MultiAuthState {
                 hash,
                 UserIdentity {
                     user_id,
+                    role: "admin".to_string(),
                     workspace_read_scopes: Vec::new(),
                 },
             )],
@@ -163,7 +166,8 @@ impl DbAuthenticator {
 
         let identity = UserIdentity {
             user_id: user_record.id.clone(),
-            workspace_read_scopes: Vec::new(), // DB-backed users don't have static scopes yet
+            role: user_record.role.clone(),
+            workspace_read_scopes: Vec::new(),
         };
 
         // Record token usage (best-effort, don't block auth)
@@ -227,6 +231,31 @@ where
             .cloned()
             .map(AuthenticatedUser)
             .ok_or((StatusCode::UNAUTHORIZED, "Not authenticated"))
+    }
+}
+
+/// Axum extractor that requires the authenticated user to have the `admin` role.
+///
+/// Use instead of `AuthenticatedUser` on endpoints that modify system-wide
+/// state (user management, model selection, extension/skill installation).
+pub struct AdminUser(pub UserIdentity);
+
+impl<S> FromRequestParts<S> for AdminUser
+where
+    S: Send + Sync,
+{
+    type Rejection = (StatusCode, &'static str);
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        let identity = parts
+            .extensions
+            .get::<UserIdentity>()
+            .cloned()
+            .ok_or((StatusCode::UNAUTHORIZED, "Not authenticated"))?;
+        if identity.role != "admin" {
+            return Err((StatusCode::FORBIDDEN, "Admin role required"));
+        }
+        Ok(AdminUser(identity))
     }
 }
 
@@ -346,6 +375,7 @@ mod tests {
             "tok-alice".to_string(),
             UserIdentity {
                 user_id: "alice".to_string(),
+                role: "admin".to_string(),
                 workspace_read_scopes: Vec::new(),
             },
         );
@@ -353,6 +383,7 @@ mod tests {
             "tok-bob".to_string(),
             UserIdentity {
                 user_id: "bob".to_string(),
+                role: "admin".to_string(),
                 workspace_read_scopes: Vec::new(),
             },
         );
@@ -622,6 +653,7 @@ mod tests {
             "tok-alice".to_string(),
             UserIdentity {
                 user_id: "alice".to_string(),
+                role: "admin".to_string(),
                 workspace_read_scopes: vec!["shared".to_string()],
             },
         );
@@ -629,6 +661,7 @@ mod tests {
             "tok-bob".to_string(),
             UserIdentity {
                 user_id: "bob".to_string(),
+                role: "admin".to_string(),
                 workspace_read_scopes: vec!["shared".to_string(), "alice".to_string()],
             },
         );

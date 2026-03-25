@@ -45,6 +45,7 @@ fn two_user_auth() -> MultiAuthState {
         ALICE_TOKEN.to_string(),
         UserIdentity {
             user_id: ALICE_USER_ID.to_string(),
+            role: "admin".to_string(),
             workspace_read_scopes: Vec::new(),
         },
     );
@@ -52,6 +53,7 @@ fn two_user_auth() -> MultiAuthState {
         BOB_TOKEN.to_string(),
         UserIdentity {
             user_id: BOB_USER_ID.to_string(),
+            role: "admin".to_string(),
             workspace_read_scopes: vec!["shared".to_string()],
         },
     );

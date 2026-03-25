@@ -10,7 +10,7 @@ use crate::db::libsql::LibSqlBackend;
 use crate::db::{ApiTokenRecord, DatabaseError, InvitationRecord, UserRecord, UserStore};
 
 fn row_to_user(row: &libsql::Row) -> Result<UserRecord, DatabaseError> {
-    let metadata_str = get_text(row, 8);
+    let metadata_str = get_text(row, 9);
     let metadata: serde_json::Value = serde_json::from_str(&metadata_str)
         .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
     Ok(UserRecord {
@@ -18,10 +18,11 @@ fn row_to_user(row: &libsql::Row) -> Result<UserRecord, DatabaseError> {
         email: get_opt_text(row, 1),
         display_name: get_text(row, 2),
         status: get_text(row, 3),
-        created_at: get_ts(row, 4),
-        updated_at: get_ts(row, 5),
-        last_login_at: get_opt_ts(row, 6),
-        created_by: get_opt_text(row, 7),
+        role: get_text(row, 4),
+        created_at: get_ts(row, 5),
+        updated_at: get_ts(row, 6),
+        last_login_at: get_opt_ts(row, 7),
+        created_by: get_opt_text(row, 8),
         metadata,
     })
 }
@@ -69,14 +70,15 @@ impl UserStore for LibSqlBackend {
 
         conn.execute(
             r#"
-            INSERT INTO users (id, email, display_name, status, created_at, updated_at, last_login_at, created_by, metadata)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            INSERT INTO users (id, email, display_name, status, role, created_at, updated_at, last_login_at, created_by, metadata)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
             "#,
             params![
                 user.id.as_str(),
                 opt_text(user.email.as_deref()),
                 user.display_name.as_str(),
                 user.status.as_str(),
+                user.role.as_str(),
                 fmt_ts(&user.created_at),
                 fmt_ts(&user.updated_at),
                 fmt_opt_ts(&user.last_login_at),
@@ -94,7 +96,7 @@ impl UserStore for LibSqlBackend {
         let mut rows = conn
             .query(
                 r#"
-                SELECT id, email, display_name, status, created_at, updated_at,
+                SELECT id, email, display_name, status, role, created_at, updated_at,
                        last_login_at, created_by, metadata
                 FROM users WHERE id = ?1
                 "#,
@@ -118,7 +120,7 @@ impl UserStore for LibSqlBackend {
         let mut rows = conn
             .query(
                 r#"
-                SELECT id, email, display_name, status, created_at, updated_at,
+                SELECT id, email, display_name, status, role, created_at, updated_at,
                        last_login_at, created_by, metadata
                 FROM users WHERE email = ?1
                 "#,
@@ -144,7 +146,7 @@ impl UserStore for LibSqlBackend {
         let mut rows = if let Some(status) = status {
             conn.query(
                 r#"
-                SELECT id, email, display_name, status, created_at, updated_at,
+                SELECT id, email, display_name, status, role, created_at, updated_at,
                        last_login_at, created_by, metadata
                 FROM users WHERE status = ?1
                 ORDER BY created_at DESC
@@ -156,7 +158,7 @@ impl UserStore for LibSqlBackend {
         } else {
             conn.query(
                 r#"
-                SELECT id, email, display_name, status, created_at, updated_at,
+                SELECT id, email, display_name, status, role, created_at, updated_at,
                        last_login_at, created_by, metadata
                 FROM users
                 ORDER BY created_at DESC
@@ -316,7 +318,7 @@ impl UserStore for LibSqlBackend {
                 SELECT
                     t.id, t.user_id, t.name, t.token_prefix, t.expires_at,
                     t.last_used_at, t.created_at, t.revoked_at,
-                    u.id, u.email, u.display_name, u.status, u.created_at,
+                    u.id, u.email, u.display_name, u.status, u.role, u.created_at,
                     u.updated_at, u.last_login_at, u.created_by, u.metadata
                 FROM api_tokens t
                 JOIN users u ON u.id = t.user_id
@@ -351,7 +353,7 @@ impl UserStore for LibSqlBackend {
                     revoked_at: get_opt_ts(&row, 7),
                 };
 
-                let metadata_str = get_text(&row, 16);
+                let metadata_str = get_text(&row, 17);
                 let metadata: serde_json::Value = serde_json::from_str(&metadata_str)
                     .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
 
@@ -360,10 +362,11 @@ impl UserStore for LibSqlBackend {
                     email: get_opt_text(&row, 9),
                     display_name: get_text(&row, 10),
                     status: get_text(&row, 11),
-                    created_at: get_ts(&row, 12),
-                    updated_at: get_ts(&row, 13),
-                    last_login_at: get_opt_ts(&row, 14),
-                    created_by: get_opt_text(&row, 15),
+                    role: get_text(&row, 12),
+                    created_at: get_ts(&row, 13),
+                    updated_at: get_ts(&row, 14),
+                    last_login_at: get_opt_ts(&row, 15),
+                    created_by: get_opt_text(&row, 16),
                     metadata,
                 };
 
@@ -541,6 +544,7 @@ mod tests {
             email: Some(format!("{}@test.com", id)),
             display_name: id.to_string(),
             status: "active".to_string(),
+            role: "member".to_string(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
             last_login_at: None,
@@ -730,6 +734,7 @@ mod tests {
             email: Some("newuser@test.com".to_string()),
             display_name: "New User".to_string(),
             status: "active".to_string(),
+            role: "member".to_string(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
             last_login_at: None,

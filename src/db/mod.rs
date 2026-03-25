@@ -320,6 +320,8 @@ pub struct UserRecord {
     pub display_name: String,
     /// `active`, `suspended`, or `deactivated`.
     pub status: String,
+    /// `admin` or `member`.
+    pub role: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub last_login_at: Option<DateTime<Utc>>,

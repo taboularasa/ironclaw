@@ -3102,6 +3102,7 @@ mod tests {
         // without needing the full auth middleware layer.
         req.extensions_mut().insert(UserIdentity {
             user_id: "test".to_string(),
+            role: "admin".to_string(),
             workspace_read_scopes: Vec::new(),
         });
 
@@ -3186,6 +3187,7 @@ mod tests {
         // without needing the full auth middleware layer.
         req.extensions_mut().insert(UserIdentity {
             user_id: "test".to_string(),
+            role: "admin".to_string(),
             workspace_read_scopes: Vec::new(),
         });
 

@@ -8,6 +8,7 @@ CREATE TABLE users (
     email TEXT UNIQUE,                          -- nullable for token-only users
     display_name TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'active',       -- active | suspended | deactivated
+    role TEXT NOT NULL DEFAULT 'member',          -- admin | member
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     last_login_at TIMESTAMPTZ,

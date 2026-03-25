@@ -33,6 +33,7 @@ fn two_user_auth() -> MultiAuthState {
         "tok-alice".to_string(),
         UserIdentity {
             user_id: "alice".to_string(),
+            role: "admin".to_string(),
             workspace_read_scopes: vec!["shared".to_string()],
         },
     );
@@ -40,6 +41,7 @@ fn two_user_auth() -> MultiAuthState {
         "tok-bob".to_string(),
         UserIdentity {
             user_id: "bob".to_string(),
+            role: "admin".to_string(),
             workspace_read_scopes: vec!["shared".to_string(), "alice".to_string()],
         },
     );
@@ -188,6 +190,7 @@ mod workspace_pool {
         );
         let identity = UserIdentity {
             user_id: "alice".to_string(),
+            role: "admin".to_string(),
             workspace_read_scopes: vec![],
         };
         let ws = pool.get_or_create(&identity).await;
@@ -216,6 +219,7 @@ mod workspace_pool {
         );
         let identity = UserIdentity {
             user_id: "alice".to_string(),
+            role: "admin".to_string(),
             workspace_read_scopes: vec![],
         };
         let ws = pool.get_or_create(&identity).await;
@@ -239,6 +243,7 @@ mod workspace_pool {
         );
         let identity = UserIdentity {
             user_id: "bob".to_string(),
+            role: "admin".to_string(),
             workspace_read_scopes: vec!["alice".to_string(), "shared".to_string()],
         };
         let ws = pool.get_or_create(&identity).await;
@@ -265,10 +270,12 @@ mod workspace_pool {
         );
         let alice_id = UserIdentity {
             user_id: "alice".to_string(),
+            role: "admin".to_string(),
             workspace_read_scopes: vec![],
         };
         let bob_id = UserIdentity {
             user_id: "bob".to_string(),
+            role: "admin".to_string(),
             workspace_read_scopes: vec![],
         };
 
@@ -300,6 +307,7 @@ mod workspace_pool {
         );
         let identity = UserIdentity {
             user_id: "alice".to_string(),
+            role: "admin".to_string(),
             workspace_read_scopes: vec!["token-scope".to_string()],
         };
         let ws = pool.get_or_create(&identity).await;
