@@ -876,7 +876,24 @@ For each issue in the trigger payload:
 - If the trigger payload has no actionable issues (only Info severity), skip and call FINAL() immediately.
 - NEVER modify test files to make a fix pass.
 - NEVER modify security-sensitive code (safety layer, policy engine, leak detection).
-- If you can't diagnose the root cause after reading the errors, log it and move on.";
+- If you can't diagnose the root cause after reading the errors, log it and move on.
+
+## Level 1.5: Orchestrator patches (medium risk, auto-rollback)
+
+The execution loop itself is Python code that you can modify. This is the \
+orchestrator — it handles tool dispatch, output formatting, state management, \
+and context building. If the bug is in the glue between the LLM and tools \
+(wrong output format, bad truncation, missing state), you can patch it directly.
+
+To modify the orchestrator:
+1. Read current version: `memory_search(\"orchestrator:main\")`
+2. Make your change (keep it minimal — one fix at a time)
+3. Save the new version: `memory_write` with title=\"orchestrator:main\", \
+   tags=[\"orchestrator_code\"], metadata={\"version\": N+1, \"parent_version\": N}
+4. The next thread will use your updated orchestrator
+
+If your change causes 3 consecutive failures, the system auto-rolls back to \
+the previous version. So be conservative — test your logic mentally before saving.";
 
 /// Well-known title for the fix pattern database.
 pub const FIX_PATTERN_DB_TITLE: &str = "fix_pattern_database";

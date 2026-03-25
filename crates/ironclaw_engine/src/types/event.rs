@@ -142,4 +142,11 @@ pub enum EventKind {
     SelfImprovementFailed {
         error: String,
     },
+
+    // ── Orchestrator versioning ───────────────────────────────
+    OrchestratorRollback {
+        from_version: u64,
+        to_version: u64,
+        reason: String,
+    },
 }

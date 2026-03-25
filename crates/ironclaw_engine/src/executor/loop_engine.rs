@@ -279,13 +279,18 @@ impl ExecutionLoop {
         )
         .await;
 
-        // Post-cleanup: persist final state
+        // Post-cleanup: persist final state, track failures for auto-rollback
         match result {
             Ok(orch_result) => {
-                // Token tracking is handled by __emit_event__("step_completed")
-                // and __llm_complete__ within the orchestrator, so no need to
-                // add orch_result.tokens_used here (would double-count).
-                let _ = &orch_result.tokens_used; // acknowledge field
+                // Reset failure counter on success
+                if let Some(store) = self.store.as_ref() {
+                    crate::executor::orchestrator::reset_orchestrator_failures(
+                        store,
+                        self.thread.project_id,
+                    )
+                    .await;
+                }
+                let _ = &orch_result.tokens_used;
                 self.clear_runtime_checkpoint();
                 self.persist_runtime_state(None, &mut persisted_event_count)
                     .await?;
@@ -298,6 +303,27 @@ impl ExecutionLoop {
                     orchestrator_version,
                     "orchestrator execution failed"
                 );
+
+                // Record failure for auto-rollback tracking
+                if let Some(store) = self.store.as_ref() {
+                    crate::executor::orchestrator::record_orchestrator_failure(
+                        store,
+                        self.thread.project_id,
+                        orchestrator_version,
+                    )
+                    .await;
+
+                    // Emit rollback event if this version will be skipped next time
+                    // (failure count was just incremented, so check >= threshold - 1)
+                    if orchestrator_version > 0 {
+                        self.emit_event(EventKind::OrchestratorRollback {
+                            from_version: orchestrator_version,
+                            to_version: orchestrator_version.saturating_sub(1),
+                            reason: format!("execution failed: {e}"),
+                        });
+                    }
+                }
+
                 // Transition to failed if not already in a terminal state
                 if self.thread.state != ThreadState::Completed
                     && self.thread.state != ThreadState::Failed

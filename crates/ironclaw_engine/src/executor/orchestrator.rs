@@ -69,36 +69,148 @@ fn orchestrator_limits() -> ResourceLimits {
         .max_memory(128 * 1024 * 1024) // 128 MB
 }
 
+/// Maximum consecutive failures before auto-rollback.
+const MAX_FAILURES_BEFORE_ROLLBACK: u64 = 3;
+
+/// Well-known title for orchestrator failure tracking.
+const FAILURE_TRACKER_TITLE: &str = "orchestrator:failures";
+
 /// Load orchestrator code: runtime version from Store, or compiled-in default.
+///
+/// Checks the failure tracker — if the latest version has >= 3 consecutive
+/// failures, falls back to the previous version (or compiled-in default).
 pub async fn load_orchestrator(
     store: Option<&Arc<dyn Store>>,
     project_id: ProjectId,
 ) -> (String, u64) {
-    if let Some(store) = store
-        && let Ok(docs) = store.list_memory_docs(project_id).await
-        && let Some(doc) = docs
-            .iter()
-            .filter(|d| {
-                d.title == ORCHESTRATOR_TITLE
-                    && d.tags.contains(&ORCHESTRATOR_TAG.to_string())
-            })
-            .max_by_key(|d| {
-                d.metadata
-                    .get("version")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0)
-            })
-    {
+    let Some(store) = store else {
+        debug!("using compiled-in default orchestrator (v0, no store)");
+        return (DEFAULT_ORCHESTRATOR.to_string(), 0);
+    };
+
+    let docs = match store.list_memory_docs(project_id).await {
+        Ok(d) => d,
+        Err(_) => {
+            debug!("using compiled-in default orchestrator (v0, store error)");
+            return (DEFAULT_ORCHESTRATOR.to_string(), 0);
+        }
+    };
+
+    // Find all orchestrator versions, sorted by version number descending
+    let mut versions: Vec<_> = docs
+        .iter()
+        .filter(|d| {
+            d.title == ORCHESTRATOR_TITLE && d.tags.contains(&ORCHESTRATOR_TAG.to_string())
+        })
+        .collect();
+    versions.sort_by(|a, b| {
+        let va = a.metadata.get("version").and_then(|v| v.as_u64()).unwrap_or(0);
+        let vb = b.metadata.get("version").and_then(|v| v.as_u64()).unwrap_or(0);
+        vb.cmp(&va) // descending
+    });
+
+    if versions.is_empty() {
+        debug!("using compiled-in default orchestrator (v0)");
+        return (DEFAULT_ORCHESTRATOR.to_string(), 0);
+    }
+
+    // Check failure count for the latest version
+    let failures = load_failure_count(&docs);
+
+    for doc in &versions {
         let version = doc
             .metadata
             .get("version")
             .and_then(|v| v.as_u64())
             .unwrap_or(1);
+
+        // Skip versions with too many failures (only check the latest)
+        if version == versions[0].metadata.get("version").and_then(|v| v.as_u64()).unwrap_or(1)
+            && failures >= MAX_FAILURES_BEFORE_ROLLBACK
+        {
+            warn!(
+                version,
+                failures, "orchestrator version has too many failures, skipping"
+            );
+            continue;
+        }
+
         debug!(version, "loaded runtime orchestrator");
         return (doc.content.clone(), version);
     }
-    debug!("using compiled-in default orchestrator (v0)");
+
+    // All versions failed — fall back to compiled-in default
+    debug!("all orchestrator versions failed, using compiled-in default (v0)");
     (DEFAULT_ORCHESTRATOR.to_string(), 0)
+}
+
+/// Record a failure for the current orchestrator version.
+pub async fn record_orchestrator_failure(
+    store: &Arc<dyn Store>,
+    project_id: ProjectId,
+    version: u64,
+) {
+    use crate::types::memory::{DocType, MemoryDoc};
+
+    let docs = store.list_memory_docs(project_id).await.unwrap_or_default();
+    let existing = docs.iter().find(|d| d.title == FAILURE_TRACKER_TITLE);
+
+    let mut tracker = if let Some(doc) = existing {
+        doc.clone()
+    } else {
+        MemoryDoc::new(project_id, DocType::Note, FAILURE_TRACKER_TITLE, "")
+            .with_tags(vec!["orchestrator_meta".to_string()])
+    };
+
+    // Store failure count as JSON in content: {"version": N, "count": M}
+    let current: serde_json::Value =
+        serde_json::from_str(&tracker.content).unwrap_or(serde_json::json!({}));
+    let current_version = current.get("version").and_then(|v| v.as_u64()).unwrap_or(0);
+    let current_count = current.get("count").and_then(|v| v.as_u64()).unwrap_or(0);
+
+    let new_count = if current_version == version {
+        current_count + 1
+    } else {
+        1 // new version, reset count
+    };
+
+    tracker.content = serde_json::json!({
+        "version": version,
+        "count": new_count,
+    })
+    .to_string();
+    tracker.updated_at = chrono::Utc::now();
+
+    if let Err(e) = store.save_memory_doc(&tracker).await {
+        warn!("failed to save orchestrator failure tracker: {e}");
+    }
+
+    debug!(version, count = new_count, "recorded orchestrator failure");
+}
+
+/// Reset the failure counter (called after successful execution).
+pub async fn reset_orchestrator_failures(
+    store: &Arc<dyn Store>,
+    project_id: ProjectId,
+) {
+    let docs = store.list_memory_docs(project_id).await.unwrap_or_default();
+    let existing = docs.iter().find(|d| d.title == FAILURE_TRACKER_TITLE);
+
+    if let Some(doc) = existing {
+        let mut tracker = doc.clone();
+        tracker.content = serde_json::json!({"version": 0, "count": 0}).to_string();
+        tracker.updated_at = chrono::Utc::now();
+        let _ = store.save_memory_doc(&tracker).await;
+    }
+}
+
+/// Load failure count for the latest orchestrator version.
+fn load_failure_count(docs: &[crate::types::memory::MemoryDoc]) -> u64 {
+    docs.iter()
+        .find(|d| d.title == FAILURE_TRACKER_TITLE)
+        .and_then(|d| serde_json::from_str::<serde_json::Value>(&d.content).ok())
+        .and_then(|v| v.get("count").and_then(|c| c.as_u64()))
+        .unwrap_or(0)
 }
 
 /// Execute the orchestrator Python code with host function dispatch.
@@ -985,4 +1097,230 @@ fn extract_u64_kwarg(kwargs: &[(MontyObject, MontyObject)], name: &str) -> Optio
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::memory::{DocType, MemoryDoc};
+    use crate::types::project::ProjectId;
+
+    #[tokio::test]
+    async fn load_orchestrator_without_store_returns_default() {
+        let (code, version) = load_orchestrator(None, ProjectId::new()).await;
+        assert_eq!(version, 0);
+        assert!(code.contains("run_loop"));
+        assert!(code.contains("__llm_complete__"));
+    }
+
+    #[tokio::test]
+    async fn load_orchestrator_with_runtime_version() {
+        let project_id = ProjectId::new();
+        let mut doc = MemoryDoc::new(
+            project_id,
+            DocType::Note,
+            ORCHESTRATOR_TITLE,
+            "custom_orchestrator_code()",
+        )
+        .with_tags(vec![ORCHESTRATOR_TAG.to_string()]);
+        doc.metadata = serde_json::json!({"version": 1});
+
+        let store = Arc::new(crate::tests::InMemoryStore::with_docs(vec![doc]));
+        let (code, version) =
+            load_orchestrator(Some(&(store as Arc<dyn Store>)), project_id).await;
+        assert_eq!(version, 1);
+        assert!(code.contains("custom_orchestrator_code"));
+    }
+
+    #[tokio::test]
+    async fn load_orchestrator_picks_highest_version() {
+        let project_id = ProjectId::new();
+        let mut doc_v1 = MemoryDoc::new(
+            project_id,
+            DocType::Note,
+            ORCHESTRATOR_TITLE,
+            "v1_code()",
+        )
+        .with_tags(vec![ORCHESTRATOR_TAG.to_string()]);
+        doc_v1.metadata = serde_json::json!({"version": 1});
+
+        let mut doc_v3 = MemoryDoc::new(
+            project_id,
+            DocType::Note,
+            ORCHESTRATOR_TITLE,
+            "v3_code()",
+        )
+        .with_tags(vec![ORCHESTRATOR_TAG.to_string()]);
+        doc_v3.metadata = serde_json::json!({"version": 3});
+
+        let mut doc_v2 = MemoryDoc::new(
+            project_id,
+            DocType::Note,
+            ORCHESTRATOR_TITLE,
+            "v2_code()",
+        )
+        .with_tags(vec![ORCHESTRATOR_TAG.to_string()]);
+        doc_v2.metadata = serde_json::json!({"version": 2});
+
+        let store =
+            Arc::new(crate::tests::InMemoryStore::with_docs(vec![doc_v1, doc_v3, doc_v2]));
+        let (code, version) =
+            load_orchestrator(Some(&(store as Arc<dyn Store>)), project_id).await;
+        assert_eq!(version, 3);
+        assert!(code.contains("v3_code"));
+    }
+
+    #[tokio::test]
+    async fn rollback_after_max_failures() {
+        let project_id = ProjectId::new();
+
+        // Create v2 orchestrator
+        let mut doc_v2 = MemoryDoc::new(
+            project_id,
+            DocType::Note,
+            ORCHESTRATOR_TITLE,
+            "v2_buggy()",
+        )
+        .with_tags(vec![ORCHESTRATOR_TAG.to_string()]);
+        doc_v2.metadata = serde_json::json!({"version": 2});
+
+        // Create v1 orchestrator (fallback)
+        let mut doc_v1 = MemoryDoc::new(
+            project_id,
+            DocType::Note,
+            ORCHESTRATOR_TITLE,
+            "v1_stable()",
+        )
+        .with_tags(vec![ORCHESTRATOR_TAG.to_string()]);
+        doc_v1.metadata = serde_json::json!({"version": 1});
+
+        // Create failure tracker showing v2 has 3 failures
+        let tracker = MemoryDoc::new(
+            project_id,
+            DocType::Note,
+            FAILURE_TRACKER_TITLE,
+            r#"{"version": 2, "count": 3}"#,
+        )
+        .with_tags(vec!["orchestrator_meta".to_string()]);
+
+        let store = Arc::new(crate::tests::InMemoryStore::with_docs(vec![
+            doc_v2, doc_v1, tracker,
+        ]));
+        let (code, version) =
+            load_orchestrator(Some(&(store as Arc<dyn Store>)), project_id).await;
+
+        // Should skip v2 (too many failures) and load v1
+        assert_eq!(version, 1);
+        assert!(code.contains("v1_stable"));
+    }
+
+    #[tokio::test]
+    async fn rollback_to_default_when_all_versions_fail() {
+        let project_id = ProjectId::new();
+
+        // Single version with 3 failures
+        let mut doc_v1 = MemoryDoc::new(
+            project_id,
+            DocType::Note,
+            ORCHESTRATOR_TITLE,
+            "v1_broken()",
+        )
+        .with_tags(vec![ORCHESTRATOR_TAG.to_string()]);
+        doc_v1.metadata = serde_json::json!({"version": 1});
+
+        let tracker = MemoryDoc::new(
+            project_id,
+            DocType::Note,
+            FAILURE_TRACKER_TITLE,
+            r#"{"version": 1, "count": 5}"#,
+        )
+        .with_tags(vec!["orchestrator_meta".to_string()]);
+
+        let store =
+            Arc::new(crate::tests::InMemoryStore::with_docs(vec![doc_v1, tracker]));
+        let (code, version) =
+            load_orchestrator(Some(&(store as Arc<dyn Store>)), project_id).await;
+
+        // Should fall back to compiled-in default (v0)
+        assert_eq!(version, 0);
+        assert!(code.contains("run_loop"));
+    }
+
+    #[tokio::test]
+    async fn record_and_reset_failures() {
+        let project_id = ProjectId::new();
+        let store: Arc<dyn Store> = Arc::new(crate::tests::InMemoryStore::with_docs(vec![]));
+
+        // Record 3 failures
+        record_orchestrator_failure(&store, project_id, 2).await;
+        record_orchestrator_failure(&store, project_id, 2).await;
+        record_orchestrator_failure(&store, project_id, 2).await;
+
+        let docs = store.list_memory_docs(project_id).await.unwrap();
+        let count = load_failure_count(&docs);
+        assert_eq!(count, 3);
+
+        // Reset
+        reset_orchestrator_failures(&store, project_id).await;
+        let docs = store.list_memory_docs(project_id).await.unwrap();
+        let count = load_failure_count(&docs);
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn failure_count_resets_on_new_version() {
+        let project_id = ProjectId::new();
+        let store: Arc<dyn Store> = Arc::new(crate::tests::InMemoryStore::with_docs(vec![]));
+
+        // Record failures for version 1
+        record_orchestrator_failure(&store, project_id, 1).await;
+        record_orchestrator_failure(&store, project_id, 1).await;
+
+        // Switch to version 2 — count should reset to 1
+        record_orchestrator_failure(&store, project_id, 2).await;
+
+        let docs = store.list_memory_docs(project_id).await.unwrap();
+        let count = load_failure_count(&docs);
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn parse_outcome_completed() {
+        let result = serde_json::json!({"outcome": "completed", "response": "Hello!"});
+        let outcome = parse_outcome(&result);
+        assert!(matches!(outcome, ThreadOutcome::Completed { response: Some(r) } if r == "Hello!"));
+    }
+
+    #[test]
+    fn parse_outcome_failed() {
+        let result = serde_json::json!({"outcome": "failed", "error": "boom"});
+        let outcome = parse_outcome(&result);
+        assert!(matches!(outcome, ThreadOutcome::Failed { error } if error == "boom"));
+    }
+
+    #[test]
+    fn parse_outcome_need_approval() {
+        let result = serde_json::json!({
+            "outcome": "need_approval",
+            "action_name": "shell",
+            "call_id": "abc",
+            "parameters": {"cmd": "rm -rf /"}
+        });
+        let outcome = parse_outcome(&result);
+        assert!(matches!(outcome, ThreadOutcome::NeedApproval { action_name, .. } if action_name == "shell"));
+    }
+
+    #[test]
+    fn parse_outcome_max_iterations() {
+        let result = serde_json::json!({"outcome": "max_iterations"});
+        let outcome = parse_outcome(&result);
+        assert!(matches!(outcome, ThreadOutcome::MaxIterations));
+    }
+
+    #[test]
+    fn parse_outcome_stopped() {
+        let result = serde_json::json!({"outcome": "stopped"});
+        let outcome = parse_outcome(&result);
+        assert!(matches!(outcome, ThreadOutcome::Stopped));
+    }
 }
