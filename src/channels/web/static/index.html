@@ -97,7 +97,6 @@
       <button data-tab="memory" data-i18n="tab.memory">Memory</button>
       <button data-tab="jobs" data-i18n="tab.jobs">Jobs</button>
       <button data-tab="routines" data-i18n="tab.routines">Routines</button>
-      <button data-tab="users" data-i18n="tab.users">Users</button>
       <button data-tab="settings" data-i18n="tab.settings">Settings</button>
       <div class="spacer"></div>
 
@@ -283,31 +282,6 @@
       </div>
     </div>
 
-    <!-- Users Tab (admin) -->
-    <div class="tab-panel" id="tab-users">
-      <div class="users-container">
-        <div class="users-header">
-          <h3>User Management</h3>
-          <button id="users-create-btn" class="btn-primary">+ New User</button>
-        </div>
-        <div id="users-create-form" style="display:none" class="users-form">
-          <input type="text" id="user-display-name" placeholder="Display name" />
-          <input type="email" id="user-email" placeholder="Email (optional)" />
-          <select id="user-role"><option value="member">Member</option><option value="admin">Admin</option></select>
-          <button id="users-create-submit" class="btn-primary">Create</button>
-          <button id="users-create-cancel" class="btn-secondary">Cancel</button>
-        </div>
-        <div id="users-token-result" style="display:none" class="users-token-banner"></div>
-        <table class="routines-table" id="users-table">
-          <thead><tr>
-            <th>ID</th><th>Display Name</th><th>Email</th><th>Role</th><th>Status</th><th>Created</th><th>Actions</th>
-          </tr></thead>
-          <tbody id="users-tbody"></tbody>
-        </table>
-        <div id="users-empty" class="empty-state" style="display:none">No users found. Create the first user to get started.</div>
-      </div>
-    </div>
-
     <!-- Settings Tab -->
     <div class="tab-panel" id="tab-settings">
       <div class="settings-layout">
@@ -319,6 +293,7 @@
           <button class="settings-subtab" data-settings-subtab="extensions" data-i18n="tab.extensions">Extensions</button>
           <button class="settings-subtab" data-settings-subtab="mcp" data-i18n="settings.mcp">MCP</button>
           <button class="settings-subtab" data-settings-subtab="skills" data-i18n="tab.skills">Skills</button>
+          <button class="settings-subtab" data-settings-subtab="users" data-i18n="settings.users">Users</button>
           <button class="settings-theme-toggle" id="settings-theme-toggle" data-i18n="theme.tooltipSystem" title="Toggle theme">Theme</button>
         </div>
         <div class="settings-content">
@@ -414,6 +389,29 @@
                   <button id="skill-install-btn" data-i18n="extensions.install">Install</button>
                 </div>
               </div>
+            </div>
+          </div>
+          <div class="settings-subpanel" id="settings-users">
+            <div class="users-container">
+              <div class="users-header">
+                <h3>User Management</h3>
+                <button id="users-create-btn" class="btn-primary">+ New User</button>
+              </div>
+              <div id="users-create-form" style="display:none" class="users-form">
+                <input type="text" id="user-display-name" placeholder="Display name" />
+                <input type="email" id="user-email" placeholder="Email (optional)" />
+                <select id="user-role"><option value="member">Member</option><option value="admin">Admin</option></select>
+                <button id="users-create-submit" class="btn-primary">Create</button>
+                <button id="users-create-cancel" class="btn-secondary">Cancel</button>
+              </div>
+              <div id="users-token-result" style="display:none" class="users-token-banner"></div>
+              <table class="routines-table" id="users-table">
+                <thead><tr>
+                  <th>ID</th><th>Display Name</th><th>Email</th><th>Role</th><th>Status</th><th>Created</th><th>Actions</th>
+                </tr></thead>
+                <tbody id="users-tbody"></tbody>
+              </table>
+              <div id="users-empty" class="empty-state" style="display:none">No users found. Create the first user to get started.</div>
             </div>
           </div>
         </div>

@@ -631,6 +631,50 @@ async fn async_main() -> anyhow::Result<()> {
         if let Some(ref d) = components.db {
             gw = gw.with_store(Arc::clone(d));
             gw = gw.with_db_auth(Arc::clone(d));
+
+            // Bootstrap: create the first admin user from single-user config
+            // so the owner appears in the Users admin panel immediately.
+            if let Ok(false) = d.has_any_users().await {
+                let now = chrono::Utc::now();
+                let user = ironclaw::db::UserRecord {
+                    id: gw_config.user_id.clone(),
+                    email: None,
+                    display_name: gw_config.user_id.clone(),
+                    status: "active".to_string(),
+                    role: "admin".to_string(),
+                    created_at: now,
+                    updated_at: now,
+                    last_login_at: None,
+                    created_by: None,
+                    metadata: serde_json::json!({"source": "bootstrap"}),
+                };
+                if let Err(e) = d.create_user(&user).await {
+                    tracing::warn!("Failed to bootstrap admin user: {}", e);
+                } else {
+                    // Also create an API token from the gateway auth token so
+                    // DB-backed auth works for the bootstrapped user.
+                    let auth_token = gw.auth_token();
+                    if !auth_token.is_empty() {
+                        use ironclaw::channels::web::auth::hash_token;
+                        let hash = hash_token(auth_token);
+                        let prefix = if auth_token.len() >= 8 {
+                            &auth_token[..8]
+                        } else {
+                            auth_token
+                        };
+                        if let Err(e) = d
+                            .create_api_token(&gw_config.user_id, "bootstrap", &hash, prefix, None)
+                            .await
+                        {
+                            tracing::warn!("Failed to create bootstrap token: {}", e);
+                        }
+                    }
+                    tracing::info!(
+                        user_id = gw_config.user_id,
+                        "Bootstrapped admin user from gateway config"
+                    );
+                }
+            }
         }
         if let Some(ref jm) = container_job_manager {
             gw = gw.with_job_manager(Arc::clone(jm));

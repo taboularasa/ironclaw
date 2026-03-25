@@ -2213,7 +2213,6 @@ function switchTab(tab) {
   if (tab === 'memory') loadMemoryTree();
   if (tab === 'jobs') loadJobs();
   if (tab === 'routines') loadRoutines();
-  if (tab === 'users') loadUsers();
   if (tab === 'logs') applyLogFilters();
   if (tab === 'settings') {
     loadSettingsSubtab(currentSettingsSubtab);
@@ -5044,7 +5043,7 @@ document.addEventListener('keydown', (e) => {
   // Mod+1-5: switch tabs
   if (mod && e.key >= '1' && e.key <= '5') {
     e.preventDefault();
-    const tabs = ['chat', 'memory', 'jobs', 'routines', 'users', 'settings'];
+    const tabs = ['chat', 'memory', 'jobs', 'routines', 'settings'];
     const idx = parseInt(e.key) - 1;
     if (tabs[idx]) switchTab(tabs[idx]);
     return;
@@ -5139,6 +5138,7 @@ function loadSettingsSubtab(subtab) {
   else if (subtab === 'extensions') { loadExtensions(); startPairingPoll(); }
   else if (subtab === 'mcp') loadMcpServers();
   else if (subtab === 'skills') loadSkills();
+  else if (subtab === 'users') loadUsers();
   if (subtab !== 'extensions' && subtab !== 'channels') stopPairingPoll();
 }
 
