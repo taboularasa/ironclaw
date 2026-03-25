@@ -848,6 +848,29 @@ pub trait UserStore: Send + Sync {
 
     /// Check whether any user records exist (for first-run bootstrap detection).
     async fn has_any_users(&self) -> Result<bool, DatabaseError>;
+
+    /// Delete a user and all their data across all user-scoped tables.
+    /// Returns false if the user doesn't exist.
+    async fn delete_user(&self, id: &str) -> Result<bool, DatabaseError>;
+
+    /// Get per-user LLM usage stats for a time period.
+    /// Aggregates from llm_calls via agent_jobs.user_id.
+    async fn user_usage_stats(
+        &self,
+        user_id: Option<&str>,
+        since: DateTime<Utc>,
+    ) -> Result<Vec<UserUsageStats>, DatabaseError>;
+}
+
+/// Per-user LLM usage statistics.
+#[derive(Debug, Clone)]
+pub struct UserUsageStats {
+    pub user_id: String,
+    pub model: String,
+    pub call_count: i64,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub total_cost: Decimal,
 }
 
 /// Backend-agnostic database supertrait.

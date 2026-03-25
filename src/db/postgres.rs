@@ -861,4 +861,16 @@ impl UserStore for PgBackend {
     async fn has_any_users(&self) -> Result<bool, DatabaseError> {
         self.store.has_any_users().await
     }
+
+    async fn delete_user(&self, id: &str) -> Result<bool, DatabaseError> {
+        self.store.delete_user(id).await
+    }
+
+    async fn user_usage_stats(
+        &self,
+        user_id: Option<&str>,
+        since: DateTime<Utc>,
+    ) -> Result<Vec<crate::db::UserUsageStats>, DatabaseError> {
+        self.store.user_usage_stats(user_id, since).await
+    }
 }

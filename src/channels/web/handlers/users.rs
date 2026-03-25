@@ -268,3 +268,136 @@ pub async fn users_activate_handler(
         "status": "active",
     })))
 }
+
+/// DELETE /api/admin/users/{id} — delete a user and all their data.
+pub async fn users_delete_handler(
+    State(state): State<Arc<GatewayState>>,
+    AdminUser(_user): AdminUser,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let store = state.store.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Database not available".to_string(),
+    ))?;
+
+    let deleted = store
+        .delete_user(&id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    if !deleted {
+        return Err((StatusCode::NOT_FOUND, "User not found".to_string()));
+    }
+
+    Ok(Json(serde_json::json!({
+        "id": id,
+        "deleted": true,
+    })))
+}
+
+/// GET /api/profile — get the authenticated user's own profile.
+pub async fn profile_get_handler(
+    State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let store = state.store.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Database not available".to_string(),
+    ))?;
+
+    let record = store
+        .get_user(&user.user_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((StatusCode::NOT_FOUND, "User not found".to_string()))?;
+
+    Ok(Json(serde_json::json!({
+        "id": record.id,
+        "email": record.email,
+        "display_name": record.display_name,
+        "status": record.status,
+        "role": record.role,
+        "created_at": record.created_at.to_rfc3339(),
+        "last_login_at": record.last_login_at.map(|dt| dt.to_rfc3339()),
+    })))
+}
+
+/// PATCH /api/profile — update the authenticated user's own profile.
+pub async fn profile_update_handler(
+    State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let store = state.store.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Database not available".to_string(),
+    ))?;
+
+    let current = store
+        .get_user(&user.user_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((StatusCode::NOT_FOUND, "User not found".to_string()))?;
+
+    let display_name = body
+        .get("display_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or(&current.display_name);
+    let metadata = body.get("metadata").unwrap_or(&current.metadata);
+
+    store
+        .update_user_profile(&user.user_id, display_name, metadata)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(serde_json::json!({
+        "id": user.user_id,
+        "display_name": display_name,
+        "updated": true,
+    })))
+}
+
+/// GET /api/admin/usage — per-user LLM usage stats.
+pub async fn usage_stats_handler(
+    State(state): State<Arc<GatewayState>>,
+    AdminUser(_user): AdminUser,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let store = state.store.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Database not available".to_string(),
+    ))?;
+
+    let user_id = params.get("user_id").map(|s| s.as_str());
+    let period = params.get("period").map(|s| s.as_str()).unwrap_or("day");
+    let since = match period {
+        "week" => chrono::Utc::now() - chrono::Duration::days(7),
+        "month" => chrono::Utc::now() - chrono::Duration::days(30),
+        _ => chrono::Utc::now() - chrono::Duration::days(1),
+    };
+
+    let stats = store
+        .user_usage_stats(user_id, since)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let entries: Vec<serde_json::Value> = stats
+        .iter()
+        .map(|s| {
+            serde_json::json!({
+                "user_id": s.user_id,
+                "model": s.model,
+                "call_count": s.call_count,
+                "input_tokens": s.input_tokens,
+                "output_tokens": s.output_tokens,
+                "total_cost": s.total_cost.to_string(),
+            })
+        })
+        .collect();
+
+    Ok(Json(serde_json::json!({
+        "period": period,
+        "since": since.to_rfc3339(),
+        "usage": entries,
+    })))
+}

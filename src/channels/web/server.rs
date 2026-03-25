@@ -519,7 +519,8 @@ pub async fn start_server(
         .route(
             "/api/admin/users/{id}",
             get(super::handlers::users::users_detail_handler)
-                .patch(super::handlers::users::users_update_handler),
+                .patch(super::handlers::users::users_update_handler)
+                .delete(super::handlers::users::users_delete_handler),
         )
         .route(
             "/api/admin/users/{id}/suspend",
@@ -528,6 +529,17 @@ pub async fn start_server(
         .route(
             "/api/admin/users/{id}/activate",
             post(super::handlers::users::users_activate_handler),
+        )
+        // Usage reporting (admin)
+        .route(
+            "/api/admin/usage",
+            get(super::handlers::users::usage_stats_handler),
+        )
+        // User self-service profile
+        .route(
+            "/api/profile",
+            get(super::handlers::users::profile_get_handler)
+                .patch(super::handlers::users::profile_update_handler),
         )
         // Token management
         .route(

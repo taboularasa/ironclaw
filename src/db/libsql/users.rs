@@ -385,6 +385,117 @@ impl UserStore for LibSqlBackend {
             .is_some();
         Ok(has_users)
     }
+
+    async fn delete_user(&self, id: &str) -> Result<bool, DatabaseError> {
+        let conn = self.connect().await?;
+        // Delete from child tables first to avoid FK violations.
+        // agent_jobs cascades to job_actions, llm_calls, estimation_snapshots
+        // conversations cascades to conversation_messages
+        // memory_documents cascades to memory_chunks
+        // routines cascades to routine_runs
+        for table in &[
+            "settings",
+            "heartbeat_state",
+            "tool_rate_limit_state",
+            "secret_usage_log",
+            "leak_detection_events",
+            "secrets",
+            "wasm_tools",
+            "routines",
+            "memory_documents",
+            "agent_jobs",
+            "conversations",
+        ] {
+            conn.execute(
+                &format!("DELETE FROM {} WHERE user_id = ?1", table),
+                params![id],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        }
+        // Nullify self-referencing created_by before deleting the user
+        conn.execute(
+            "UPDATE users SET created_by = NULL WHERE created_by = ?1",
+            params![id],
+        )
+        .await
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        // api_tokens cascade automatically via FK
+        let rows = conn
+            .execute("DELETE FROM users WHERE id = ?1", params![id])
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        Ok(rows > 0)
+    }
+
+    async fn user_usage_stats(
+        &self,
+        user_id: Option<&str>,
+        since: DateTime<Utc>,
+    ) -> Result<Vec<crate::db::UserUsageStats>, DatabaseError> {
+        let conn = self.connect().await?;
+        let since_str = fmt_ts(&since);
+        let mut rows = if let Some(uid) = user_id {
+            conn.query(
+                r#"
+                SELECT j.user_id, l.model, COUNT(*) as call_count,
+                       COALESCE(SUM(l.input_tokens), 0) as input_tokens,
+                       COALESCE(SUM(l.output_tokens), 0) as output_tokens,
+                       COALESCE(SUM(l.cost), 0) as total_cost
+                FROM llm_calls l
+                JOIN agent_jobs j ON l.job_id = j.id
+                WHERE l.created_at >= ?1
+                  AND j.user_id = ?2
+                GROUP BY j.user_id, l.model
+                ORDER BY total_cost DESC
+                "#,
+                params![since_str, uid],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        } else {
+            conn.query(
+                r#"
+                SELECT j.user_id, l.model, COUNT(*) as call_count,
+                       COALESCE(SUM(l.input_tokens), 0) as input_tokens,
+                       COALESCE(SUM(l.output_tokens), 0) as output_tokens,
+                       COALESCE(SUM(l.cost), 0) as total_cost
+                FROM llm_calls l
+                JOIN agent_jobs j ON l.job_id = j.id
+                WHERE l.created_at >= ?1
+                GROUP BY j.user_id, l.model
+                ORDER BY total_cost DESC
+                "#,
+                params![since_str],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        };
+        let mut stats = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        {
+            let cost_str = get_text(&row, 5);
+            let total_cost = rust_decimal::Decimal::from_str_exact(&cost_str).unwrap_or_default();
+            stats.push(crate::db::UserUsageStats {
+                user_id: get_text(&row, 0),
+                model: get_text(&row, 1),
+                call_count: row
+                    .get::<i64>(2)
+                    .map_err(|e| DatabaseError::Query(e.to_string()))?,
+                input_tokens: row
+                    .get::<i64>(3)
+                    .map_err(|e| DatabaseError::Query(e.to_string()))?,
+                output_tokens: row
+                    .get::<i64>(4)
+                    .map_err(|e| DatabaseError::Query(e.to_string()))?,
+                total_cost,
+            });
+        }
+        Ok(stats)
+    }
 }
 
 #[cfg(test)]

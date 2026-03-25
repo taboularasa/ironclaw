@@ -2536,6 +2536,100 @@ impl Store {
             .await?;
         Ok(row.get("has_users"))
     }
+
+    /// Delete a user and all their data across all user-scoped tables.
+    /// Returns false if the user doesn't exist.
+    pub async fn delete_user(&self, id: &str) -> Result<bool, DatabaseError> {
+        let conn = self.conn().await?;
+        // Delete from child tables first to avoid FK violations.
+        // agent_jobs cascades to job_actions, llm_calls, estimation_snapshots
+        // conversations cascades to conversation_messages
+        // memory_documents cascades to memory_chunks
+        // routines cascades to routine_runs
+        for table in &[
+            "settings",
+            "heartbeat_state",
+            "tool_rate_limit_state",
+            "secret_usage_log",
+            "leak_detection_events",
+            "secrets",
+            "wasm_tools",
+            "routines",
+            "memory_documents",
+            "agent_jobs",
+            "conversations",
+        ] {
+            conn.execute(&format!("DELETE FROM {} WHERE user_id = $1", table), &[&id])
+                .await?;
+        }
+        // Nullify self-referencing created_by before deleting the user
+        conn.execute(
+            "UPDATE users SET created_by = NULL WHERE created_by = $1",
+            &[&id],
+        )
+        .await?;
+        // api_tokens cascade automatically via FK
+        let result = conn
+            .execute("DELETE FROM users WHERE id = $1", &[&id])
+            .await?;
+        Ok(result > 0)
+    }
+
+    /// Get per-user LLM usage stats for a time period.
+    /// Aggregates from llm_calls via agent_jobs.user_id.
+    pub async fn user_usage_stats(
+        &self,
+        user_id: Option<&str>,
+        since: DateTime<Utc>,
+    ) -> Result<Vec<crate::db::UserUsageStats>, DatabaseError> {
+        let conn = self.conn().await?;
+        let rows = if let Some(uid) = user_id {
+            conn.query(
+                r#"
+                SELECT j.user_id, l.model, COUNT(*) as call_count,
+                       COALESCE(SUM(l.input_tokens), 0) as input_tokens,
+                       COALESCE(SUM(l.output_tokens), 0) as output_tokens,
+                       COALESCE(SUM(l.cost), 0) as total_cost
+                FROM llm_calls l
+                JOIN agent_jobs j ON l.job_id = j.id
+                WHERE l.created_at >= $1
+                  AND j.user_id = $2
+                GROUP BY j.user_id, l.model
+                ORDER BY total_cost DESC
+                "#,
+                &[&since, &uid],
+            )
+            .await?
+        } else {
+            conn.query(
+                r#"
+                SELECT j.user_id, l.model, COUNT(*) as call_count,
+                       COALESCE(SUM(l.input_tokens), 0) as input_tokens,
+                       COALESCE(SUM(l.output_tokens), 0) as output_tokens,
+                       COALESCE(SUM(l.cost), 0) as total_cost
+                FROM llm_calls l
+                JOIN agent_jobs j ON l.job_id = j.id
+                WHERE l.created_at >= $1
+                GROUP BY j.user_id, l.model
+                ORDER BY total_cost DESC
+                "#,
+                &[&since],
+            )
+            .await?
+        };
+        let mut stats = Vec::with_capacity(rows.len());
+        for row in &rows {
+            stats.push(crate::db::UserUsageStats {
+                user_id: row.get("user_id"),
+                model: row.get("model"),
+                call_count: row.get("call_count"),
+                input_tokens: row.get("input_tokens"),
+                output_tokens: row.get("output_tokens"),
+                total_cost: row.get("total_cost"),
+            });
+        }
+        Ok(stats)
+    }
 }
 
 #[cfg(feature = "postgres")]
