@@ -58,7 +58,7 @@ use self::log_layer::{LogBroadcaster, LogLevelHandle};
 use self::auth::MultiAuthState;
 use self::server::GatewayState;
 use self::sse::SseManager;
-use self::types::SseEvent;
+use self::types::AppEvent;
 
 /// Web gateway channel implementing the Channel trait.
 pub struct GatewayChannel {
@@ -98,7 +98,8 @@ impl GatewayChannel {
             job_manager: None,
             prompt_queue: None,
             scheduler: None,
-            default_user_id: config.user_id.clone(),
+            owner_id: config.user_id.clone(),
+            default_sender_id: config.user_id.clone(),
             shutdown_tx: tokio::sync::RwLock::new(None),
             ws_tracker: Some(Arc::new(ws::WsConnectionTracker::new())),
             llm_provider: None,
@@ -122,6 +123,22 @@ impl GatewayChannel {
         }
     }
 
+    /// Rebind the single-user auth identity to the durable owner scope while
+    /// preserving the configured gateway sender/routing identity.
+    pub fn with_owner_scope(mut self, owner_id: impl Into<String>) -> Self {
+        let owner_id = owner_id.into();
+        let single_user_token = if self.config.user_tokens.is_none() {
+            self.auth.first_token().map(ToOwned::to_owned)
+        } else {
+            None
+        };
+        if let Some(token) = single_user_token {
+            self.auth = MultiAuthState::single(token, owner_id.clone());
+        }
+        self.rebuild_state(|s| s.owner_id = owner_id);
+        self
+    }
+
     /// Create a gateway channel with a pre-built multi-user auth state.
     pub fn new_multi_auth(config: GatewayConfig, auth: MultiAuthState) -> Self {
         let state = Arc::new(GatewayState {
@@ -138,7 +155,8 @@ impl GatewayChannel {
             job_manager: None,
             prompt_queue: None,
             scheduler: None,
-            default_user_id: config.user_id.clone(),
+            owner_id: config.user_id.clone(),
+            default_sender_id: config.user_id.clone(),
             shutdown_tx: tokio::sync::RwLock::new(None),
             ws_tracker: Some(Arc::new(ws::WsConnectionTracker::new())),
             llm_provider: None,
@@ -179,7 +197,8 @@ impl GatewayChannel {
             job_manager: self.state.job_manager.clone(),
             prompt_queue: self.state.prompt_queue.clone(),
             scheduler: self.state.scheduler.clone(),
-            default_user_id: self.state.default_user_id.clone(),
+            owner_id: self.state.owner_id.clone(),
+            default_sender_id: self.state.default_sender_id.clone(),
             shutdown_tx: tokio::sync::RwLock::new(None),
             ws_tracker: self.state.ws_tracker.clone(),
             llm_provider: self.state.llm_provider.clone(),
@@ -379,7 +398,7 @@ impl Channel for GatewayChannel {
 
         self.state.sse.broadcast_for_user(
             &msg.user_id,
-            SseEvent::Response {
+            AppEvent::Response {
                 content: response.content,
                 thread_id,
             },
@@ -398,11 +417,11 @@ impl Channel for GatewayChannel {
             .and_then(|v| v.as_str())
             .map(String::from);
         let event = match status {
-            StatusUpdate::Thinking(msg) => SseEvent::Thinking {
+            StatusUpdate::Thinking(msg) => AppEvent::Thinking {
                 message: msg,
                 thread_id: thread_id.clone(),
             },
-            StatusUpdate::ToolStarted { name } => SseEvent::ToolStarted {
+            StatusUpdate::ToolStarted { name } => AppEvent::ToolStarted {
                 name,
                 thread_id: thread_id.clone(),
             },
@@ -411,23 +430,23 @@ impl Channel for GatewayChannel {
                 success,
                 error,
                 parameters,
-            } => SseEvent::ToolCompleted {
+            } => AppEvent::ToolCompleted {
                 name,
                 success,
                 error,
                 parameters,
                 thread_id: thread_id.clone(),
             },
-            StatusUpdate::ToolResult { name, preview } => SseEvent::ToolResult {
+            StatusUpdate::ToolResult { name, preview } => AppEvent::ToolResult {
                 name,
                 preview,
                 thread_id: thread_id.clone(),
             },
-            StatusUpdate::StreamChunk(content) => SseEvent::StreamChunk {
+            StatusUpdate::StreamChunk(content) => AppEvent::StreamChunk {
                 content,
                 thread_id: thread_id.clone(),
             },
-            StatusUpdate::Status(msg) => SseEvent::Status {
+            StatusUpdate::Status(msg) => AppEvent::Status {
                 message: msg,
                 thread_id: thread_id.clone(),
             },
@@ -435,7 +454,7 @@ impl Channel for GatewayChannel {
                 job_id,
                 title,
                 browse_url,
-            } => SseEvent::JobStarted {
+            } => AppEvent::JobStarted {
                 job_id,
                 title,
                 browse_url,
@@ -446,7 +465,7 @@ impl Channel for GatewayChannel {
                 description,
                 parameters,
                 allow_always,
-            } => SseEvent::ApprovalNeeded {
+            } => AppEvent::ApprovalNeeded {
                 request_id,
                 tool_name,
                 description,
@@ -460,7 +479,7 @@ impl Channel for GatewayChannel {
                 instructions,
                 auth_url,
                 setup_url,
-            } => SseEvent::AuthRequired {
+            } => AppEvent::AuthRequired {
                 extension_name,
                 instructions,
                 auth_url,
@@ -470,17 +489,17 @@ impl Channel for GatewayChannel {
                 extension_name,
                 success,
                 message,
-            } => SseEvent::AuthCompleted {
+            } => AppEvent::AuthCompleted {
                 extension_name,
                 success,
                 message,
             },
-            StatusUpdate::ImageGenerated { data_url, path } => SseEvent::ImageGenerated {
+            StatusUpdate::ImageGenerated { data_url, path } => AppEvent::ImageGenerated {
                 data_url,
                 path,
                 thread_id: thread_id.clone(),
             },
-            StatusUpdate::Suggestions { suggestions } => SseEvent::Suggestions {
+            StatusUpdate::Suggestions { suggestions } => AppEvent::Suggestions {
                 suggestions,
                 thread_id,
             },
@@ -488,7 +507,7 @@ impl Channel for GatewayChannel {
                 input_tokens,
                 output_tokens,
                 cost_usd,
-            } => SseEvent::TurnCost {
+            } => AppEvent::TurnCost {
                 input_tokens,
                 output_tokens,
                 cost_usd,
@@ -524,7 +543,7 @@ impl Channel for GatewayChannel {
         };
         self.state.sse.broadcast_for_user(
             user_id,
-            SseEvent::Response {
+            AppEvent::Response {
                 content: response.content,
                 thread_id,
             },
