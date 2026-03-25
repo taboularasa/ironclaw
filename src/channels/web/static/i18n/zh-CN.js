@@ -44,7 +44,8 @@ I18n.register('zh-CN', {
   'settings.channels': '频道',
   'settings.networking': '网络',
   'settings.mcp': 'MCP',
-  
+  'settings.users': '用户管理',
+
   // 状态
   'status.connected': '已连接',
   'status.disconnected': '已断开',

@@ -4415,12 +4415,14 @@ function createTokenForUser(userId, displayName) {
 function showTokenBanner(tokenValue) {
   var banner = document.getElementById('users-token-result');
   if (!banner) return;
+  var loginUrl = window.location.origin + '/?token=' + encodeURIComponent(tokenValue);
   banner.style.display = 'block';
-  banner.innerHTML = '<strong>Token created!</strong> Copy this now — it won\'t be shown again:<br>'
-    + '<code class="token-display" id="token-copy-value">' + escapeHtml(tokenValue) + '</code>'
-    + '<button class="btn-small" id="token-copy-btn">Copy</button>';
-  document.getElementById('token-copy-btn').addEventListener('click', function() {
-    navigator.clipboard.writeText(tokenValue);
+  banner.innerHTML = '<strong>User created!</strong> Share this login link — it won\'t be shown again:<br>'
+    + '<code class="token-display" id="token-copy-value">' + escapeHtml(loginUrl) + '</code>'
+    + '<button class="btn-small" id="token-copy-link">Copy Link</button>'
+    + '<br><span style="font-size:0.8em;color:var(--text-muted)">Raw token: ' + escapeHtml(tokenValue) + '</span>';
+  document.getElementById('token-copy-link').addEventListener('click', function() {
+    navigator.clipboard.writeText(loginUrl);
     this.textContent = 'Copied!';
   });
 }
