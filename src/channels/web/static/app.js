@@ -2213,6 +2213,7 @@ function switchTab(tab) {
   if (tab === 'memory') loadMemoryTree();
   if (tab === 'jobs') loadJobs();
   if (tab === 'routines') loadRoutines();
+  if (tab === 'users') loadUsers();
   if (tab === 'logs') applyLogFilters();
   if (tab === 'settings') {
     loadSettingsSubtab(currentSettingsSubtab);
@@ -4339,6 +4340,116 @@ function formatRelativeTime(isoString) {
   return future ? I18n.t('time.daysFromNow', { n: days }) : I18n.t('time.daysAgo', { n: days });
 }
 
+// --- Users (admin) ---
+
+function loadUsers() {
+  apiFetch('/api/admin/users').then(function(data) {
+    renderUsersList(data.users || []);
+  }).catch(function(err) {
+    // Non-admin users get 403 — show a message instead of an error
+    var tbody = document.getElementById('users-tbody');
+    var empty = document.getElementById('users-empty');
+    if (tbody) tbody.innerHTML = '';
+    if (empty) {
+      empty.style.display = 'block';
+      empty.textContent = 'Admin access required to manage users.';
+    }
+  });
+}
+
+function renderUsersList(users) {
+  var tbody = document.getElementById('users-tbody');
+  var empty = document.getElementById('users-empty');
+  if (!users || users.length === 0) {
+    tbody.innerHTML = '';
+    empty.style.display = 'block';
+    empty.textContent = 'No users found. Create the first user to get started.';
+    return;
+  }
+  empty.style.display = 'none';
+  tbody.innerHTML = users.map(function(u) {
+    var statusClass = u.status === 'active' ? 'active' : 'failed';
+    var roleLabel = u.role === 'admin' ? '<span class="badge badge-admin">admin</span>' : '<span class="badge">member</span>';
+    var actions = '';
+    if (u.status === 'active') {
+      actions += '<button class="btn-small btn-danger" onclick="suspendUser(\'' + u.id + '\')">Suspend</button> ';
+    } else {
+      actions += '<button class="btn-small btn-primary" onclick="activateUser(\'' + u.id + '\')">Activate</button> ';
+    }
+    actions += '<button class="btn-small" onclick="createTokenForUser(\'' + u.id + '\', \'' + escapeHtml(u.display_name) + '\')">+ Token</button>';
+    return '<tr>'
+      + '<td class="user-id" title="' + escapeHtml(u.id) + '">' + escapeHtml(u.id.substring(0, 8)) + '…</td>'
+      + '<td>' + escapeHtml(u.display_name) + '</td>'
+      + '<td>' + escapeHtml(u.email || '—') + '</td>'
+      + '<td>' + roleLabel + '</td>'
+      + '<td><span class="status-badge ' + statusClass + '">' + escapeHtml(u.status) + '</span></td>'
+      + '<td>' + formatRelativeTime(u.created_at) + '</td>'
+      + '<td>' + actions + '</td>'
+      + '</tr>';
+  }).join('');
+}
+
+function suspendUser(userId) {
+  apiFetch('/api/admin/users/' + userId + '/suspend', { method: 'POST' })
+    .then(function() { loadUsers(); })
+    .catch(function(e) { alert('Failed to suspend user: ' + e.message); });
+}
+
+function activateUser(userId) {
+  apiFetch('/api/admin/users/' + userId + '/activate', { method: 'POST' })
+    .then(function() { loadUsers(); })
+    .catch(function(e) { alert('Failed to activate user: ' + e.message); });
+}
+
+function createTokenForUser(userId, displayName) {
+  var tokenName = prompt('Token name for ' + displayName + ':', 'api-token');
+  if (!tokenName) return;
+  apiFetch('/api/tokens', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: tokenName, user_id: userId }),
+  }).then(function(data) {
+    var banner = document.getElementById('users-token-result');
+    banner.style.display = 'block';
+    banner.innerHTML = '<strong>Token created!</strong> Copy this now — it won\'t be shown again:<br>'
+      + '<code class="token-display">' + escapeHtml(data.token) + '</code>'
+      + '<button class="btn-small" onclick="navigator.clipboard.writeText(\'' + escapeHtml(data.token) + '\');this.textContent=\'Copied!\'">Copy</button>';
+  }).catch(function(e) { alert('Failed to create token: ' + e.message); });
+}
+
+// Wire up Users tab create form
+document.getElementById('users-create-btn')?.addEventListener('click', function() {
+  document.getElementById('users-create-form').style.display = 'flex';
+  document.getElementById('users-token-result').style.display = 'none';
+  document.getElementById('user-display-name').focus();
+});
+
+document.getElementById('users-create-cancel')?.addEventListener('click', function() {
+  document.getElementById('users-create-form').style.display = 'none';
+});
+
+document.getElementById('users-create-submit')?.addEventListener('click', function() {
+  var displayName = document.getElementById('user-display-name').value.trim();
+  var email = document.getElementById('user-email').value.trim();
+  var role = document.getElementById('user-role').value;
+  if (!displayName) { alert('Display name is required'); return; }
+
+  apiFetch('/api/admin/users', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      display_name: displayName,
+      email: email || undefined,
+      role: role,
+    }),
+  }).then(function() {
+    document.getElementById('users-create-form').style.display = 'none';
+    document.getElementById('user-display-name').value = '';
+    document.getElementById('user-email').value = '';
+    loadUsers();
+  }).catch(function(e) { alert('Failed to create user: ' + e.message); });
+});
+
 // --- Gateway status widget ---
 
 let gatewayStatusInterval = null;
@@ -4933,7 +5044,7 @@ document.addEventListener('keydown', (e) => {
   // Mod+1-5: switch tabs
   if (mod && e.key >= '1' && e.key <= '5') {
     e.preventDefault();
-    const tabs = ['chat', 'memory', 'jobs', 'routines', 'settings'];
+    const tabs = ['chat', 'memory', 'jobs', 'routines', 'users', 'settings'];
     const idx = parseInt(e.key) - 1;
     if (tabs[idx]) switchTab(tabs[idx]);
     return;
