@@ -181,8 +181,8 @@ def run_loop(context, goal, actions, state, config):
             if nudge_enabled and nudge_count < max_nudges and signals_tool_intent(text):
                 nudge_count += 1
                 __add_message__("user",
-                    "You described what you'd do but didn't write code. "
-                    "Please write a ```repl code block to execute your plan.")
+                    "You expressed intent to use a tool but didn't make an action call. "
+                    "Please go ahead and call the appropriate action.")
                 continue
 
             # Plain text response - done

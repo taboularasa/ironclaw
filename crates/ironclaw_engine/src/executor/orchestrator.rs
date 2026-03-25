@@ -597,6 +597,10 @@ fn handle_emit_event(
         "step_completed" => {
             let input = extract_u64_kwarg(kwargs, "input_tokens").unwrap_or(0);
             let output = extract_u64_kwarg(kwargs, "output_tokens").unwrap_or(0);
+            // Increment step count (mirrors the old Rust loop's step_count += 1)
+            thread.step_count += 1;
+            // Track token usage
+            thread.total_tokens_used += input + output;
             EventKind::StepCompleted {
                 step_id: StepId::new(),
                 tokens: TokenUsage {

@@ -282,8 +282,10 @@ impl ExecutionLoop {
         // Post-cleanup: persist final state
         match result {
             Ok(orch_result) => {
-                self.thread.total_tokens_used += orch_result.tokens_used.total();
-                self.thread.total_cost_usd += orch_result.tokens_used.cost_usd;
+                // Token tracking is handled by __emit_event__("step_completed")
+                // and __llm_complete__ within the orchestrator, so no need to
+                // add orch_result.tokens_used here (would double-count).
+                let _ = &orch_result.tokens_used; // acknowledge field
                 self.clear_runtime_checkpoint();
                 self.persist_runtime_state(None, &mut persisted_event_count)
                     .await?;
