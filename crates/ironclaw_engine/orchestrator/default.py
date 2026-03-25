@@ -25,6 +25,100 @@
 #   config   - thread config dict
 
 
+# ── Helper functions (self-modifiable glue) ──────────────────
+# Defined before run_loop so they are in scope when called.
+
+
+def extract_final(text):
+    """Extract FINAL() content from text. Returns None if not found."""
+    idx = text.find("FINAL(")
+    if idx < 0:
+        return None
+    after = text[idx + 6:]
+    # Handle triple-quoted strings
+    for q in ['"""', "'''"]:
+        if after.startswith(q):
+            end = after.find(q, len(q))
+            if end >= 0:
+                return after[len(q):end]
+    # Handle single/double quoted strings
+    if after and after[0] in ('"', "'"):
+        quote = after[0]
+        end = after.find(quote, 1)
+        if end >= 0:
+            return after[1:end]
+    # Handle balanced parens
+    depth = 1
+    for i, ch in enumerate(after):
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return after[:i]
+    return None
+
+
+def signals_tool_intent(text):
+    """Check if text describes tool usage without actually executing tools."""
+    lower = text.lower()
+    intent_phrases = ["i will", "i'll", "let me", "i would", "i should",
+                      "i can", "i need to", "we should", "we can"]
+    tool_phrases = ["search", "fetch", "call", "run", "execute",
+                    "use the", "query", "look up"]
+    has_intent = any(p in lower for p in intent_phrases)
+    has_tool = any(p in lower for p in tool_phrases)
+    return has_intent and has_tool
+
+
+def format_output(result, max_chars=8000):
+    """Format code execution result for the next LLM context message."""
+    parts = []
+
+    stdout = result.get("stdout", "")
+    if stdout:
+        parts.append("[stdout]\n" + stdout)
+
+    for r in result.get("action_results", []):
+        name = r.get("action_name", "?")
+        output = str(r.get("output", ""))
+        if r.get("is_error"):
+            parts.append("[" + name + " ERROR] " + output)
+        else:
+            preview = output[:500] + "..." if len(output) > 500 else output
+            parts.append("[" + name + "] " + preview)
+
+    ret = result.get("return_value")
+    if ret is not None:
+        parts.append("[return] " + str(ret))
+
+    text = "\n\n".join(parts)
+
+    # Truncate from the front (keep the tail with most recent results)
+    if len(text) > max_chars:
+        text = "... (truncated) ...\n" + text[-max_chars:]
+
+    if not text:
+        text = "[code executed, no output]"
+
+    return text
+
+
+def format_docs(docs):
+    """Format memory docs for context injection."""
+    parts = ["## Prior Knowledge (from completed threads)\n"]
+    for doc in docs:
+        label = doc.get("type", "NOTE").upper()
+        content = doc.get("content", "")[:500]
+        truncated = "..." if len(doc.get("content", "")) > 500 else ""
+        parts.append("### [" + label + "] " + doc.get("title", "") +
+                      "\n" + content + truncated + "\n")
+    return "\n".join(parts)
+
+
+# ── Main execution loop ─────────────────────────────────────
+
+
 def run_loop(context, goal, actions, state, config):
     """Main execution loop. Returns an outcome dict."""
     max_iterations = config.get("max_iterations", 30)
@@ -78,10 +172,10 @@ def run_loop(context, goal, actions, state, config):
             __add_message__("assistant", text)
 
             # Check for FINAL()
-            final = extract_final(text)
-            if final is not None:
+            final_answer = extract_final(text)
+            if final_answer is not None:
                 __transition_to__("completed", "FINAL() in text")
-                return {"outcome": "completed", "response": final}
+                return {"outcome": "completed", "response": final_answer}
 
             # Check for tool intent nudge
             if nudge_enabled and nudge_count < max_nudges and signals_tool_intent(text):
@@ -185,103 +279,6 @@ def run_loop(context, goal, actions, state, config):
     # Max iterations reached
     __transition_to__("completed", "max iterations reached")
     return {"outcome": "max_iterations"}
-
-
-# ── Helper functions (self-modifiable glue) ──────────────────
-
-
-def extract_final(text):
-    """Extract FINAL() content from text. Returns None if not found."""
-    idx = text.find("FINAL(")
-    if idx < 0:
-        return None
-    after = text[idx + 6:]
-    # Handle triple-quoted strings
-    for q in ['"""', "'''"]:
-        if after.startswith(q):
-            end = after.find(q, len(q))
-            if end >= 0:
-                return after[len(q):end]
-    # Handle single/double quoted strings
-    if after and after[0] in ('"', "'"):
-        quote = after[0]
-        end = after.find(quote, 1)
-        if end >= 0:
-            return after[1:end]
-    # Handle balanced parens
-    depth = 1
-    for i, ch in enumerate(after):
-        if ch == "(":
-            depth += 1
-        elif ch == ")":
-            depth -= 1
-            if depth == 0:
-                return after[:i]
-    return None
-
-
-def signals_tool_intent(text):
-    """Check if text describes tool usage without actually executing tools."""
-    lower = text.lower()
-    intent_phrases = ["i will", "i'll", "let me", "i would", "i should",
-                      "i can", "i need to", "we should", "we can"]
-    tool_phrases = ["search", "fetch", "call", "run", "execute",
-                    "use the", "query", "look up"]
-    has_intent = any(p in lower for p in intent_phrases)
-    has_tool = any(p in lower for p in tool_phrases)
-    return has_intent and has_tool
-
-
-def format_output(result, max_chars=8000):
-    """Format code execution result for the next LLM context message."""
-    parts = []
-
-    stdout = result.get("stdout", "")
-    if stdout:
-        parts.append("[stdout]\n" + stdout)
-
-    for r in result.get("action_results", []):
-        name = r.get("action_name", "?")
-        output = str(r.get("output", ""))
-        if r.get("is_error"):
-            parts.append("[" + name + " ERROR] " + output)
-        else:
-            preview = output[:500] + "..." if len(output) > 500 else output
-            parts.append("[" + name + "] " + preview)
-
-    ret = result.get("return_value")
-    if ret is not None:
-        parts.append("[return] " + str(ret))
-
-    text = "\n\n".join(parts)
-
-    # Truncate from the front (keep the tail with most recent results)
-    if len(text) > max_chars:
-        text = "... (truncated) ...\n" + text[-max_chars:]
-
-    # Add hint about state dict if there was an error
-    if result.get("had_error") and state:
-        keys = list(state.keys()) if isinstance(state, dict) else []
-        if keys:
-            text += "\n\n[HINT] Variables don't persist between code blocks. " \
-                    "Use the `state` dict. Keys: " + str(keys)
-
-    if not text:
-        text = "[code executed, no output]"
-
-    return text
-
-
-def format_docs(docs):
-    """Format memory docs for context injection."""
-    parts = ["## Prior Knowledge (from completed threads)\n"]
-    for doc in docs:
-        label = doc.get("type", "NOTE").upper()
-        content = doc.get("content", "")[:500]
-        truncated = "..." if len(doc.get("content", "")) > 500 else ""
-        parts.append("### [" + label + "] " + doc.get("title", "") +
-                      "\n" + content + truncated + "\n")
-    return "\n".join(parts)
 
 
 # Entry point: call run_loop with injected context variables

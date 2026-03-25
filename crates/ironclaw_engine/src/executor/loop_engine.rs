@@ -12,21 +12,19 @@ use tracing::{debug, warn};
 
 use crate::capability::lease::LeaseManager;
 use crate::capability::policy::PolicyEngine;
-use crate::executor::context::build_step_context;
-use crate::executor::intent;
-use crate::executor::structured::execute_action_calls;
 use crate::runtime::messaging::{SignalReceiver, ThreadOutcome, ThreadSignal};
-use crate::traits::effect::{EffectExecutor, ThreadExecutionContext};
-use crate::traits::llm::{LlmBackend, LlmCallConfig};
+use crate::traits::effect::EffectExecutor;
+use crate::traits::llm::LlmBackend;
 use crate::types::error::EngineError;
 use crate::types::event::EventKind;
 use crate::types::message::ThreadMessage;
-use crate::types::step::{ExecutionTier, LlmResponse, Step, StepStatus};
+use crate::types::step::Step;
 use crate::types::thread::{Thread, ThreadState};
 
 const RUNTIME_CHECKPOINT_METADATA_KEY: &str = "runtime_checkpoint";
 
 #[derive(Default)]
+#[allow(dead_code)]
 struct RuntimeCheckpoint {
     persisted_state: serde_json::Value,
     nudge_count: u32,
@@ -42,6 +40,7 @@ pub struct ExecutionLoop {
     leases: Arc<LeaseManager>,
     policy: Arc<PolicyEngine>,
     signal_rx: SignalReceiver,
+    #[allow(dead_code)]
     user_id: String,
     /// Optional capability registry for resolving capability-level policies.
     capabilities: Option<Arc<crate::capability::registry::CapabilityRegistry>>,
@@ -109,6 +108,7 @@ impl ExecutionLoop {
     }
 
     /// Add an event to the thread and broadcast it for live status updates.
+    #[allow(dead_code)]
     fn emit_event(&mut self, kind: EventKind) {
         let event = crate::types::event::ThreadEvent::new(self.thread.id, kind);
         if let Some(ref tx) = self.event_tx {
@@ -151,6 +151,7 @@ impl ExecutionLoop {
         }
     }
 
+    #[allow(dead_code)]
     fn save_runtime_checkpoint(
         &mut self,
         persisted_state: &serde_json::Value,
@@ -240,667 +241,83 @@ impl ExecutionLoop {
         self.persist_runtime_state(None, &mut persisted_event_count)
             .await?;
 
-        let max_iterations = self.thread.config.max_iterations;
-        let max_nudges = self.thread.config.max_tool_intent_nudges;
-        let nudge_enabled = self.thread.config.enable_tool_intent_nudge;
-        let start_time = std::time::Instant::now();
-
-        // Persisted state across code steps — accumulates return values
-        // and tool results so the next step can access them via `state`.
-        let mut persisted_state = checkpoint.persisted_state;
-        let mut nudge_count = checkpoint.nudge_count;
-        let mut consecutive_errors = checkpoint.consecutive_errors;
-        let mut compaction_count = checkpoint.compaction_count;
-
-        for iteration in self.thread.step_count..max_iterations {
-            // 1. Check signals
-            match self.check_signals() {
-                SignalAction::Continue => {}
-                SignalAction::Stop => {
-                    self.thread
-                        .transition_to(ThreadState::Completed, Some("stopped by signal".into()))?;
-                    self.clear_runtime_checkpoint();
-                    self.persist_runtime_state(None, &mut persisted_event_count)
-                        .await?;
-                    return Ok(ThreadOutcome::Stopped);
-                }
-                SignalAction::Inject(msg) => {
-                    self.thread.add_message(msg);
-                    self.persist_runtime_state(None, &mut persisted_event_count)
-                        .await?;
-                }
-            }
-
-            // 2. Check budget limits
-            if let Some(max_tokens) = self.thread.config.max_tokens_total
-                && self.thread.total_tokens_used >= max_tokens
-            {
-                warn!(
-                    thread_id = %self.thread.id,
-                    used = self.thread.total_tokens_used,
-                    limit = max_tokens,
-                    "token limit exceeded"
-                );
-                self.thread
-                    .transition_to(ThreadState::Completed, Some("token limit exceeded".into()))?;
-                self.clear_runtime_checkpoint();
-                self.persist_runtime_state(None, &mut persisted_event_count)
-                    .await?;
-                return Ok(ThreadOutcome::Failed {
-                    error: format!(
-                        "Token limit exceeded: {} of {} tokens",
-                        self.thread.total_tokens_used, max_tokens
-                    ),
-                });
-            }
-
-            if let Some(max_dur) = self.thread.config.max_duration {
-                let elapsed = start_time.elapsed();
-                if elapsed >= max_dur {
-                    warn!(
-                        thread_id = %self.thread.id,
-                        elapsed = ?elapsed,
-                        limit = ?max_dur,
-                        "thread timeout"
-                    );
-                    self.thread
-                        .transition_to(ThreadState::Completed, Some("timeout".into()))?;
-                    self.clear_runtime_checkpoint();
-                    self.persist_runtime_state(None, &mut persisted_event_count)
-                        .await?;
-                    return Ok(ThreadOutcome::Failed {
-                        error: format!("Thread timeout: {elapsed:?} of {max_dur:?}"),
-                    });
-                }
-            }
-
-            if let Some(max_usd) = self.thread.config.max_budget_usd
-                && self.thread.total_cost_usd >= max_usd
-            {
-                warn!(
-                    thread_id = %self.thread.id,
-                    used = self.thread.total_cost_usd,
-                    limit = max_usd,
-                    "USD budget exceeded"
-                );
-                self.thread
-                    .transition_to(ThreadState::Completed, Some("USD budget exceeded".into()))?;
-                self.clear_runtime_checkpoint();
-                self.persist_runtime_state(None, &mut persisted_event_count)
-                    .await?;
-                return Ok(ThreadOutcome::Failed {
-                    error: format!(
-                        "USD budget exceeded: ${:.4} of ${:.4}",
-                        self.thread.total_cost_usd, max_usd
-                    ),
-                });
-            }
-
-            // 3. Check compaction
-            if self.thread.config.enable_compaction {
-                let ctx_limit = self.thread.config.model_context_limit;
-                let threshold = self.thread.config.compaction_threshold;
-                if crate::executor::compaction::should_compact(
-                    &self.thread.messages,
-                    ctx_limit,
-                    threshold,
-                ) {
-                    debug!(
-                        thread_id = %self.thread.id,
-                        compaction_count,
-                        "triggering context compaction"
-                    );
-                    let result = crate::executor::compaction::compact_messages(
-                        &self.thread.messages,
-                        &self.llm,
-                        compaction_count,
-                    )
-                    .await?;
-                    self.thread.total_tokens_used += result.tokens_used.total();
-                    self.thread.messages = result.compacted_messages;
-                    compaction_count += 1;
-                }
-            }
-
-            // 4. Get active leases
-            let active_leases = self.leases.active_for_thread(self.thread.id).await;
-
-            // 5. Build context (inject prior knowledge on first iteration only)
-            let retrieval_ref = if self.thread.step_count == 0 {
-                self.retrieval.as_ref()
-            } else {
-                None
-            };
-            let (messages, _actions) = build_step_context(
-                &self.thread.messages,
-                &active_leases,
-                &self.effects,
-                retrieval_ref,
+        // Load versioned Python orchestrator (runtime version or compiled-in v0)
+        let (orchestrator_code, orchestrator_version) =
+            crate::executor::orchestrator::load_orchestrator(
+                self.store.as_ref(),
                 self.thread.project_id,
-                &self.thread.goal,
             )
-            .await?;
+            .await;
 
-            // 6. Create step
-            let mut step = Step::new(self.thread.id, self.thread.step_count + 1);
-            step.status = StepStatus::LlmCalling;
-            self.emit_event(EventKind::StepStarted { step_id: step.id });
-            self.persist_runtime_state(Some(&step), &mut persisted_event_count)
-                .await?;
+        debug!(
+            thread_id = %self.thread.id,
+            orchestrator_version,
+            "running Python orchestrator"
+        );
 
-            // 7. Call LLM
-            // CodeAct/RLM: send NO structured tool definitions — tools are described
-            // in the system prompt as Python functions. The LLM produces text with
-            // ```repl code blocks that the bridge detects and converts to LlmResponse::Code.
-            // This avoids the LLM using structured tool calls instead of writing code.
-            let force_text = self.thread.step_count >= max_iterations.saturating_sub(1);
-            let config = LlmCallConfig {
-                force_text,
-                depth: self.thread.config.depth,
-                ..LlmCallConfig::default()
-            };
-
-            debug!(
-                thread_id = %self.thread.id,
-                iteration,
-                message_count = messages.len(),
-                force_text,
-                "LLM call: sending {} messages",
-                messages.len(),
+        // Store version in thread metadata for rollback tracking
+        if let Some(metadata) = self.thread.metadata.as_object_mut() {
+            metadata.insert(
+                "orchestrator_version".into(),
+                serde_json::json!(orchestrator_version),
             );
-            if tracing::enabled!(tracing::Level::TRACE) {
-                for (i, msg) in messages.iter().enumerate() {
-                    let preview: String = msg.content.chars().take(200).collect();
-                    tracing::trace!(
-                        "[msg {i}] role={:?} len={} preview={preview}...",
-                        msg.role,
-                        msg.content.len(),
-                    );
-                }
-            }
-
-            let llm_output = self.llm.complete(&messages, &[], &config).await?;
-            step.tokens_used = llm_output.usage;
-            self.thread.total_tokens_used += llm_output.usage.total();
-            self.thread.total_cost_usd += llm_output.usage.cost_usd;
-            step.llm_response = Some(llm_output.response.clone());
-
-            debug!(
-                thread_id = %self.thread.id,
-                iteration,
-                input_tokens = llm_output.usage.input_tokens,
-                output_tokens = llm_output.usage.output_tokens,
-                response_type = match &llm_output.response {
-                    LlmResponse::Text(_) => "text",
-                    LlmResponse::ActionCalls { .. } => "action_calls",
-                    LlmResponse::Code { .. } => "code",
-                },
-                "LLM response received"
-            );
-
-            // 6. Handle response
-            match llm_output.response {
-                LlmResponse::Text(text) => {
-                    debug!(
-                        thread_id = %self.thread.id,
-                        iteration,
-                        text_len = text.len(),
-                        "Text response (no code block detected)"
-                    );
-                    if tracing::enabled!(tracing::Level::TRACE) {
-                        let preview: String = text.chars().take(500).collect();
-                        tracing::trace!("Text: {preview}...");
-                    }
-
-                    // Check for FINAL() in text (regex fallback — models
-                    // sometimes write FINAL() outside code blocks)
-                    if let Some(answer) = extract_final_from_text(&text) {
-                        debug!(thread_id = %self.thread.id, "FINAL() detected in text response");
-                        self.thread.add_message(ThreadMessage::assistant(text));
-                        step.status = StepStatus::Completed;
-                        step.completed_at = Some(chrono::Utc::now());
-                        self.emit_event(EventKind::StepCompleted {
-                            step_id: step.id,
-                            tokens: step.tokens_used,
-                        });
-                        self.thread.step_count += 1;
-                        self.thread.transition_to(
-                            ThreadState::Completed,
-                            Some("FINAL() in text".into()),
-                        )?;
-                        self.clear_runtime_checkpoint();
-                        self.persist_runtime_state(Some(&step), &mut persisted_event_count)
-                            .await?;
-                        return Ok(ThreadOutcome::Completed {
-                            response: Some(answer),
-                        });
-                    }
-
-                    // Check for tool intent nudge
-                    if nudge_enabled
-                        && nudge_count < max_nudges
-                        && intent::signals_tool_intent(&text)
-                    {
-                        nudge_count += 1;
-                        debug!(
-                            thread_id = %self.thread.id,
-                            nudge_count,
-                            "tool intent detected, injecting nudge"
-                        );
-                        self.thread.add_message(ThreadMessage::assistant(text));
-                        self.thread
-                            .add_message(ThreadMessage::user(intent::TOOL_INTENT_NUDGE));
-
-                        step.status = StepStatus::Completed;
-                        step.completed_at = Some(chrono::Utc::now());
-                        self.emit_event(EventKind::StepCompleted {
-                            step_id: step.id,
-                            tokens: step.tokens_used,
-                        });
-                        self.thread.step_count += 1;
-                        self.save_runtime_checkpoint(
-                            &persisted_state,
-                            nudge_count,
-                            consecutive_errors,
-                            compaction_count,
-                        );
-                        self.persist_runtime_state(Some(&step), &mut persisted_event_count)
-                            .await?;
-                        continue;
-                    }
-
-                    // Final text response
-                    self.thread
-                        .add_message(ThreadMessage::assistant(text.clone()));
-
-                    step.status = StepStatus::Completed;
-                    step.completed_at = Some(chrono::Utc::now());
-                    self.emit_event(EventKind::StepCompleted {
-                        step_id: step.id,
-                        tokens: step.tokens_used,
-                    });
-                    self.thread.step_count += 1;
-
-                    self.thread
-                        .transition_to(ThreadState::Completed, Some("text response".into()))?;
-                    self.clear_runtime_checkpoint();
-                    self.persist_runtime_state(Some(&step), &mut persisted_event_count)
-                        .await?;
-                    return Ok(ThreadOutcome::Completed {
-                        response: Some(text),
-                    });
-                }
-
-                LlmResponse::ActionCalls { calls, content } => {
-                    nudge_count = 0;
-
-                    // Record assistant message with action calls
-                    self.thread
-                        .add_message(ThreadMessage::assistant_with_actions(
-                            content,
-                            calls.clone(),
-                        ));
-
-                    step.status = StepStatus::Executing;
-
-                    // Build execution context
-                    let exec_ctx = ThreadExecutionContext {
-                        thread_id: self.thread.id,
-                        thread_type: self.thread.thread_type,
-                        project_id: self.thread.project_id,
-                        user_id: self.user_id.clone(),
-                        step_id: step.id,
-                    };
-
-                    // Collect capability-level policies from the registry.
-                    // Gathers policies from all registered capabilities — they're
-                    // cheap and deterministic. Per-action scoping happens inside
-                    // the policy engine via condition matching.
-                    let cap_policies: Vec<crate::types::capability::PolicyRule> = self
-                        .capabilities
-                        .as_ref()
-                        .map(|caps| {
-                            caps.list()
-                                .iter()
-                                .flat_map(|c| c.policies.iter().cloned())
-                                .collect()
-                        })
-                        .unwrap_or_default();
-
-                    // Execute actions
-                    let batch = execute_action_calls(
-                        &calls,
-                        &self.thread,
-                        &self.effects,
-                        &self.leases,
-                        &self.policy,
-                        &exec_ctx,
-                        &cap_policies,
-                    )
-                    .await?;
-
-                    // Record events
-                    for event_kind in batch.events {
-                        self.emit_event(event_kind);
-                    }
-
-                    // Add action results as messages
-                    for result in &batch.results {
-                        self.thread.add_message(ThreadMessage::action_result(
-                            &result.call_id,
-                            &result.action_name,
-                            serde_json::to_string(&result.output).unwrap_or_default(),
-                        ));
-                    }
-
-                    step.action_results = batch.results;
-                    step.status = StepStatus::Completed;
-                    step.completed_at = Some(chrono::Utc::now());
-                    self.emit_event(EventKind::StepCompleted {
-                        step_id: step.id,
-                        tokens: step.tokens_used,
-                    });
-                    self.thread.step_count += 1;
-
-                    // Check if approval is needed
-                    if let Some(outcome) = batch.need_approval {
-                        self.thread.transition_to(
-                            ThreadState::Waiting,
-                            Some("awaiting approval".into()),
-                        )?;
-                        self.save_runtime_checkpoint(
-                            &persisted_state,
-                            nudge_count,
-                            consecutive_errors,
-                            compaction_count,
-                        );
-                        self.persist_runtime_state(Some(&step), &mut persisted_event_count)
-                            .await?;
-                        return Ok(outcome);
-                    }
-                    self.save_runtime_checkpoint(
-                        &persisted_state,
-                        nudge_count,
-                        consecutive_errors,
-                        compaction_count,
-                    );
-                    self.persist_runtime_state(Some(&step), &mut persisted_event_count)
-                        .await?;
-                }
-
-                LlmResponse::Code { code, content } => {
-                    nudge_count = 0;
-
-                    debug!(
-                        thread_id = %self.thread.id,
-                        iteration,
-                        code_len = code.len(),
-                        "Executing Python code"
-                    );
-                    if tracing::enabled!(tracing::Level::TRACE) {
-                        tracing::trace!("Code block:\n{code}");
-                    }
-
-                    // Record assistant message with the code
-                    self.thread.add_message(ThreadMessage::assistant(
-                        content.unwrap_or_else(|| format!("```python\n{code}\n```")),
-                    ));
-
-                    step.status = StepStatus::Executing;
-                    step.tier = ExecutionTier::Scripting;
-
-                    // Inject Step 0 orientation preamble on first code step
-                    if self.thread.step_count == 0 {
-                        let preamble =
-                            crate::executor::scripting::build_orientation_preamble(&self.thread);
-                        self.thread.add_message(ThreadMessage::user(preamble));
-                    }
-
-                    let exec_ctx = ThreadExecutionContext {
-                        thread_id: self.thread.id,
-                        thread_type: self.thread.thread_type,
-                        project_id: self.thread.project_id,
-                        user_id: self.user_id.clone(),
-                        step_id: step.id,
-                    };
-
-                    // Execute via Monty with persisted state from prior steps
-                    let code_result = crate::executor::scripting::execute_code(
-                        &code,
-                        &self.thread,
-                        &self.llm,
-                        &self.effects,
-                        &self.leases,
-                        &self.policy,
-                        &exec_ctx,
-                        &[],
-                        &persisted_state,
-                    )
-                    .await?;
-
-                    debug!(
-                        thread_id = %self.thread.id,
-                        iteration,
-                        had_error = code_result.had_error,
-                        action_count = code_result.action_results.len(),
-                        stdout_len = code_result.stdout.len(),
-                        final_answer = code_result.final_answer.is_some(),
-                        recursive_tokens = code_result.recursive_tokens.total(),
-                        "Code execution complete"
-                    );
-                    if tracing::enabled!(tracing::Level::TRACE) {
-                        if !code_result.stdout.is_empty() {
-                            let preview: String = code_result.stdout.chars().take(500).collect();
-                            tracing::trace!("stdout: {preview}");
-                        }
-                        for r in &code_result.action_results {
-                            let output_preview: String = serde_json::to_string(&r.output)
-                                .unwrap_or_default()
-                                .chars()
-                                .take(300)
-                                .collect();
-                            tracing::trace!(
-                                "  tool={} ok={} output={output_preview}...",
-                                r.action_name,
-                                !r.is_error,
-                            );
-                        }
-                    }
-
-                    // Track recursive LLM token usage
-                    self.thread.total_tokens_used += code_result.recursive_tokens.total();
-
-                    // Record events
-                    for event_kind in code_result.events {
-                        self.emit_event(event_kind);
-                    }
-
-                    // Add action results as messages
-                    for result in &code_result.action_results {
-                        self.thread.add_message(ThreadMessage::action_result(
-                            &result.call_id,
-                            &result.action_name,
-                            serde_json::to_string(&result.output).unwrap_or_default(),
-                        ));
-                    }
-
-                    step.action_results = code_result.action_results;
-
-                    // Accumulate state for next step: return value + tool results.
-                    // This makes variables "persist" across code steps via `state`.
-                    if code_result.return_value != serde_json::Value::Null {
-                        persisted_state[format!("step_{}_return", self.thread.step_count)] =
-                            code_result.return_value.clone();
-                        persisted_state["last_return"] = code_result.return_value.clone();
-                    }
-                    for result in &step.action_results {
-                        persisted_state[&result.action_name] = result.output.clone();
-                    }
-
-                    // Build comprehensive output for the LLM to see what happened.
-                    // Include stdout, tool results, and return value so the model
-                    // can reason about the outputs in the next iteration.
-                    let mut output_parts = Vec::new();
-                    if !code_result.stdout.is_empty() {
-                        output_parts.push(code_result.stdout.clone());
-                    }
-                    for result in &step.action_results {
-                        let output_str = serde_json::to_string(&result.output).unwrap_or_default();
-                        let truncated = if output_str.len() > 4000 {
-                            let prefix: String = output_str.chars().take(4000).collect();
-                            format!("{prefix}... [truncated, {} total chars]", output_str.len())
-                        } else {
-                            output_str
-                        };
-                        if result.is_error {
-                            output_parts
-                                .push(format!("[{} error] {}", result.action_name, truncated));
-                        } else {
-                            output_parts
-                                .push(format!("[{} result] {}", result.action_name, truncated));
-                        }
-                    }
-                    if code_result.return_value != serde_json::Value::Null {
-                        output_parts.push(format!(
-                            "[return] {}",
-                            serde_json::to_string_pretty(&code_result.return_value)
-                                .unwrap_or_default()
-                        ));
-                    }
-                    let output_text = if output_parts.is_empty() {
-                        "[code executed, no output]".to_string()
-                    } else {
-                        output_parts.join("\n")
-                    };
-                    // Truncate total output to prevent context bloat
-                    let mut metadata = if output_text.chars().count() > 8000 {
-                        let tail: String = output_text
-                            .chars()
-                            .skip(output_text.chars().count() - 8000)
-                            .collect();
-                        format!(
-                            "[TRUNCATED: last 8000 of {} chars]\n{tail}",
-                            output_text.chars().count()
-                        )
-                    } else {
-                        output_text
-                    };
-
-                    // If code had errors, remind the model about `state`
-                    if code_result.had_error
-                        && !persisted_state.as_object().is_some_and(|m| m.is_empty())
-                    {
-                        let keys: Vec<&str> = persisted_state
-                            .as_object()
-                            .map(|m| m.keys().map(String::as_str).collect())
-                            .unwrap_or_default();
-                        metadata.push_str(&format!(
-                            "\n\n[HINT] Variables don't persist between code blocks. Use the `state` dict to access data from previous steps. Available keys: {:?}",
-                            keys
-                        ));
-                    }
-
-                    self.thread.add_message(ThreadMessage::user(metadata));
-
-                    step.status = StepStatus::Completed;
-                    step.completed_at = Some(chrono::Utc::now());
-                    self.emit_event(EventKind::StepCompleted {
-                        step_id: step.id,
-                        tokens: step.tokens_used,
-                    });
-                    self.thread.step_count += 1;
-
-                    // Check FINAL() termination
-                    if let Some(answer) = code_result.final_answer {
-                        self.thread
-                            .transition_to(ThreadState::Completed, Some("FINAL() called".into()))?;
-                        self.clear_runtime_checkpoint();
-                        self.persist_runtime_state(Some(&step), &mut persisted_event_count)
-                            .await?;
-                        return Ok(ThreadOutcome::Completed {
-                            response: Some(answer),
-                        });
-                    }
-
-                    // Check if approval is needed
-                    if let Some(outcome) = code_result.need_approval {
-                        self.thread.transition_to(
-                            ThreadState::Waiting,
-                            Some("awaiting approval".into()),
-                        )?;
-                        self.save_runtime_checkpoint(
-                            &persisted_state,
-                            nudge_count,
-                            consecutive_errors,
-                            compaction_count,
-                        );
-                        self.persist_runtime_state(Some(&step), &mut persisted_event_count)
-                            .await?;
-                        return Ok(outcome);
-                    }
-
-                    // Track consecutive errors for budget enforcement
-                    if code_result.had_error {
-                        consecutive_errors += 1;
-                    } else {
-                        consecutive_errors = 0;
-                    }
-
-                    self.save_runtime_checkpoint(
-                        &persisted_state,
-                        nudge_count,
-                        consecutive_errors,
-                        compaction_count,
-                    );
-                    self.persist_runtime_state(Some(&step), &mut persisted_event_count)
-                        .await?;
-                }
-            }
-
-            // Check consecutive error threshold after each step
-            if let Some(max_errors) = self.thread.config.max_consecutive_errors
-                && consecutive_errors >= max_errors
-            {
-                warn!(
-                    thread_id = %self.thread.id,
-                    consecutive_errors,
-                    max_errors,
-                    "consecutive error threshold exceeded"
-                );
-                self.thread.transition_to(
-                    ThreadState::Failed,
-                    Some(format!(
-                        "consecutive error threshold: {consecutive_errors} errors"
-                    )),
-                )?;
-                self.clear_runtime_checkpoint();
-                self.persist_runtime_state(None, &mut persisted_event_count)
-                    .await?;
-                return Ok(ThreadOutcome::Failed {
-                    error: format!(
-                        "Consecutive error threshold exceeded: {consecutive_errors} of {max_errors}"
-                    ),
-                });
-            }
         }
 
-        // Max iterations reached
-        warn!(
-            thread_id = %self.thread.id,
-            max_iterations,
-            "max iterations reached"
-        );
-        self.thread.transition_to(
-            ThreadState::Completed,
-            Some("max iterations reached".into()),
-        )?;
-        self.clear_runtime_checkpoint();
-        self.persist_runtime_state(None, &mut persisted_event_count)
-            .await?;
-        Ok(ThreadOutcome::MaxIterations)
+        // Execute the Python orchestrator with host function dispatch
+        let result = crate::executor::orchestrator::execute_orchestrator(
+            &orchestrator_code,
+            &mut self.thread,
+            &self.llm,
+            &self.effects,
+            &self.leases,
+            &self.policy,
+            &mut self.signal_rx,
+            self.event_tx.as_ref(),
+            self.retrieval.as_ref(),
+            self.store.as_ref(),
+            &checkpoint.persisted_state,
+        )
+        .await;
+
+        // Post-cleanup: persist final state
+        match result {
+            Ok(orch_result) => {
+                self.thread.total_tokens_used += orch_result.tokens_used.total();
+                self.thread.total_cost_usd += orch_result.tokens_used.cost_usd;
+                self.clear_runtime_checkpoint();
+                self.persist_runtime_state(None, &mut persisted_event_count)
+                    .await?;
+                Ok(orch_result.outcome)
+            }
+            Err(e) => {
+                warn!(
+                    thread_id = %self.thread.id,
+                    error = %e,
+                    orchestrator_version,
+                    "orchestrator execution failed"
+                );
+                // Transition to failed if not already in a terminal state
+                if self.thread.state != ThreadState::Completed
+                    && self.thread.state != ThreadState::Failed
+                    && self.thread.state != ThreadState::Done
+                {
+                    let _ = self.thread.transition_to(
+                        ThreadState::Failed,
+                        Some(format!("orchestrator error: {e}")),
+                    );
+                }
+                self.clear_runtime_checkpoint();
+                self.persist_runtime_state(None, &mut persisted_event_count)
+                    .await?;
+                Ok(ThreadOutcome::Failed {
+                    error: format!("Orchestrator error: {e}"),
+                })
+            }
+        }
     }
 
     /// Check for pending signals without blocking.
+    #[allow(dead_code)]
     fn check_signals(&mut self) -> SignalAction {
         match self.signal_rx.try_recv() {
             Ok(ThreadSignal::Stop) => SignalAction::Stop,
@@ -921,6 +338,7 @@ impl ExecutionLoop {
     }
 }
 
+#[allow(dead_code)]
 enum SignalAction {
     Continue,
     Stop,
@@ -937,6 +355,7 @@ enum SignalAction {
 /// This is the regex fallback from the official RLM implementation
 /// (`find_final_answer` in parsing.py) for when the model writes
 /// FINAL() outside a code block.
+#[allow(dead_code)]
 fn extract_final_from_text(text: &str) -> Option<String> {
     // Find FINAL( — could be at start of line or after whitespace
     let marker = "FINAL(";
@@ -994,8 +413,10 @@ fn extract_final_from_text(text: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::traits::effect::ThreadExecutionContext;
     use crate::traits::llm::{LlmCallConfig, LlmOutput};
     use crate::types::capability::{ActionDef, CapabilityLease, EffectType};
+    use crate::types::step::LlmResponse;
     use crate::types::project::ProjectId;
     use crate::types::step::{ActionResult, TokenUsage};
     use crate::types::thread::{ThreadConfig, ThreadType};

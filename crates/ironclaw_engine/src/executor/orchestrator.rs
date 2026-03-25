@@ -171,9 +171,12 @@ pub async fn execute_orchestrator(
     loop {
         match progress {
             RunProgress::Complete(obj) => {
-                // Orchestrator finished without calling FINAL — shouldn't happen
-                // but handle gracefully
-                let result = monty_to_json(&obj);
+                // Use FINAL result if set, otherwise fall back to VM return value
+                let result = if let Some(ref fr) = final_result {
+                    fr.clone()
+                } else {
+                    monty_to_json(&obj)
+                };
                 return Ok(OrchestratorResult {
                     outcome: parse_outcome(&result),
                     tokens_used: total_tokens,
@@ -238,11 +241,8 @@ pub async fn execute_orchestrator(
                     // __get_actions__()
                     "__get_actions__" => handle_get_actions(thread, effects, leases).await,
 
-                    // Unknown — error
-                    other => ExtFunctionResult::Error(monty::MontyException::new(
-                        monty::ExcType::NameError,
-                        Some(format!("Unknown orchestrator host function: {other}")),
-                    )),
+                    // Unknown — let Monty resolve it (user-defined functions, builtins)
+                    other => ExtFunctionResult::NotFound(other.to_string()),
                 };
 
                 // Resume the orchestrator VM
