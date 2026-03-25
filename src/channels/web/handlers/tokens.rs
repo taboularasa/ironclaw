@@ -9,7 +9,6 @@ use axum::{
 };
 use rand::RngCore;
 use rand::rngs::OsRng;
-use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::channels::web::auth::AuthenticatedUser;
@@ -41,14 +40,12 @@ pub async fn tokens_create_handler(
         expires_in_days.map(|days| chrono::Utc::now() + chrono::Duration::days(days as i64));
 
     // Generate 32 random bytes for the token.
+    // Hash the hex-encoded plaintext (what the user sends as Bearer token),
+    // NOT the raw bytes — must match hash_token() in auth.rs.
     let mut token_bytes = [0u8; 32];
     OsRng.fill_bytes(&mut token_bytes);
     let plaintext_token = hex::encode(token_bytes);
-
-    // SHA-256 hash for storage — plaintext is never persisted.
-    let mut hasher = Sha256::new();
-    hasher.update(token_bytes);
-    let hash: [u8; 32] = hasher.finalize().into();
+    let hash = crate::channels::web::auth::hash_token(&plaintext_token);
 
     // First 8 chars of the hex token as a prefix for identification.
     let token_prefix = &plaintext_token[..8];

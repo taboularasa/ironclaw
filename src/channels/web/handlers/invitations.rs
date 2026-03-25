@@ -5,7 +5,6 @@ use std::sync::Arc;
 use axum::{Json, extract::State, http::StatusCode};
 use rand::RngCore;
 use rand::rngs::OsRng;
-use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::channels::web::auth::{AdminUser, AuthenticatedUser};
@@ -37,11 +36,7 @@ pub async fn invitations_create_handler(
     let mut token_bytes = [0u8; 32];
     OsRng.fill_bytes(&mut token_bytes);
     let plaintext_token = hex::encode(token_bytes);
-
-    // SHA-256 hash for storage — plaintext is never persisted.
-    let mut hasher = Sha256::new();
-    hasher.update(token_bytes);
-    let hash: [u8; 32] = hasher.finalize().into();
+    let hash = crate::channels::web::auth::hash_token(&plaintext_token);
 
     let invitation_id = Uuid::new_v4();
     let invitation = InvitationRecord {
@@ -129,15 +124,9 @@ pub async fn invitations_accept_handler(
         .to_string();
 
     // Hash the provided token to look up the invitation.
-    let token_bytes = hex::decode(invite_token).map_err(|_| {
-        (
-            StatusCode::BAD_REQUEST,
-            "Invalid invite token format".to_string(),
-        )
-    })?;
-    let mut hasher = Sha256::new();
-    hasher.update(&token_bytes);
-    let hash: [u8; 32] = hasher.finalize().into();
+    // Hash the plaintext token string (not decoded bytes) — must match
+    // how it was hashed during invitation creation via hash_token().
+    let hash = crate::channels::web::auth::hash_token(invite_token);
 
     // Look up the invitation by hash.
     let invitation = store
@@ -187,10 +176,7 @@ pub async fn invitations_accept_handler(
     let mut api_token_bytes = [0u8; 32];
     OsRng.fill_bytes(&mut api_token_bytes);
     let plaintext_api_token = hex::encode(api_token_bytes);
-
-    let mut api_hasher = Sha256::new();
-    api_hasher.update(api_token_bytes);
-    let api_hash: [u8; 32] = api_hasher.finalize().into();
+    let api_hash = crate::channels::web::auth::hash_token(&plaintext_api_token);
 
     let api_prefix = &plaintext_api_token[..8];
 

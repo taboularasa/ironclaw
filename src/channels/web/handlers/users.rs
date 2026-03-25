@@ -9,7 +9,6 @@ use axum::{
 };
 use rand::RngCore;
 use rand::rngs::OsRng;
-use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::channels::web::auth::{AdminUser, AuthenticatedUser};
@@ -71,12 +70,12 @@ pub async fn users_create_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     // Generate a first API token so the new user can authenticate immediately.
+    // Hash the hex-encoded plaintext (what the user sends as Bearer token),
+    // NOT the raw bytes — must match hash_token() in auth.rs.
     let mut token_bytes = [0u8; 32];
     OsRng.fill_bytes(&mut token_bytes);
     let plaintext_token = hex::encode(token_bytes);
-    let mut hasher = Sha256::new();
-    hasher.update(token_bytes);
-    let token_hash: [u8; 32] = hasher.finalize().into();
+    let token_hash = crate::channels::web::auth::hash_token(&plaintext_token);
     let token_prefix = &plaintext_token[..8];
 
     let _token_record = store
