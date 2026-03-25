@@ -417,11 +417,6 @@ pub async fn start_server(
         .route(
             "/api/webhooks/u/{user_id}/{path}",
             post(crate::channels::web::handlers::webhooks::webhook_trigger_user_scoped_handler),
-        )
-        // Invitation accept (public — validated by invite token, not user auth)
-        .route(
-            "/api/invitations/accept",
-            post(super::handlers::invitations::invitations_accept_handler),
         );
 
     // Protected routes (require auth)
@@ -543,12 +538,6 @@ pub async fn start_server(
         .route(
             "/api/tokens/{id}",
             axum::routing::delete(super::handlers::tokens::tokens_revoke_handler),
-        )
-        // Invitations
-        .route(
-            "/api/invitations",
-            get(super::handlers::invitations::invitations_list_handler)
-                .post(super::handlers::invitations::invitations_create_handler),
         )
         // Gateway control plane
         .route("/api/gateway/status", get(gateway_status_handler))

@@ -2282,7 +2282,7 @@ impl Store {
 // ==================== Users / API Tokens / Invitations ====================
 
 #[cfg(feature = "postgres")]
-use crate::db::{ApiTokenRecord, InvitationRecord, UserRecord};
+use crate::db::{ApiTokenRecord, UserRecord};
 
 #[cfg(feature = "postgres")]
 impl Store {
@@ -2525,102 +2525,6 @@ impl Store {
         Ok(())
     }
 
-    /// Create a new invitation.
-    pub async fn create_invitation(
-        &self,
-        invitation: &InvitationRecord,
-        invite_hash: &[u8; 32],
-    ) -> Result<(), DatabaseError> {
-        let conn = self.conn().await?;
-        conn.execute(
-            r#"
-            INSERT INTO invitations (id, email, invite_token_hash, invited_by, status, expires_at, accepted_at, accepted_by, created_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-            "#,
-            &[
-                &invitation.id,
-                &invitation.email,
-                &invite_hash.to_vec(),
-                &invitation.invited_by,
-                &invitation.status,
-                &invitation.expires_at,
-                &invitation.accepted_at,
-                &invitation.accepted_by,
-                &invitation.created_at,
-            ],
-        )
-        .await?;
-        Ok(())
-    }
-
-    /// Look up a pending invitation by its hashed token.
-    pub async fn get_invitation_by_hash(
-        &self,
-        invite_hash: &[u8; 32],
-    ) -> Result<Option<InvitationRecord>, DatabaseError> {
-        let conn = self.conn().await?;
-        let row = conn
-            .query_opt(
-                r#"
-                SELECT id, email, invited_by, status, expires_at, accepted_at, accepted_by, created_at
-                FROM invitations
-                WHERE invite_token_hash = $1 AND status = 'pending' AND expires_at > NOW()
-                "#,
-                &[&invite_hash.to_vec()],
-            )
-            .await?;
-        Ok(row.map(|r| row_to_invitation(&r)))
-    }
-
-    /// Accept an invitation.
-    pub async fn accept_invitation(
-        &self,
-        id: Uuid,
-        accepted_by: &str,
-    ) -> Result<(), DatabaseError> {
-        let conn = self.conn().await?;
-        conn.execute(
-            "UPDATE invitations SET status = 'accepted', accepted_at = NOW(), accepted_by = $1 WHERE id = $2",
-            &[&accepted_by, &id],
-        )
-        .await?;
-        Ok(())
-    }
-
-    /// List invitations, optionally filtered by inviter.
-    pub async fn list_invitations(
-        &self,
-        invited_by: Option<&str>,
-    ) -> Result<Vec<InvitationRecord>, DatabaseError> {
-        let conn = self.conn().await?;
-        let rows = match invited_by {
-            Some(user) => {
-                conn.query(
-                    r#"
-                    SELECT id, email, invited_by, status, expires_at, accepted_at, accepted_by, created_at
-                    FROM invitations
-                    WHERE invited_by = $1
-                    ORDER BY created_at DESC
-                    "#,
-                    &[&user],
-                )
-                .await?
-            }
-            None => {
-                conn.query(
-                    r#"
-                    SELECT id, email, invited_by, status, expires_at, accepted_at, accepted_by, created_at
-                    FROM invitations
-                    ORDER BY created_at DESC
-                    "#,
-                    &[],
-                )
-                .await?
-            }
-        };
-        Ok(rows.iter().map(row_to_invitation).collect())
-    }
-
     /// Check whether any user records exist.
     pub async fn has_any_users(&self) -> Result<bool, DatabaseError> {
         let conn = self.conn().await?;
@@ -2661,20 +2565,6 @@ fn row_to_api_token(row: &tokio_postgres::Row) -> ApiTokenRecord {
         last_used_at: row.get("last_used_at"),
         created_at: row.get("created_at"),
         revoked_at: row.get("revoked_at"),
-    }
-}
-
-#[cfg(feature = "postgres")]
-fn row_to_invitation(row: &tokio_postgres::Row) -> InvitationRecord {
-    InvitationRecord {
-        id: row.get("id"),
-        email: row.get("email"),
-        invited_by: row.get("invited_by"),
-        status: row.get("status"),
-        expires_at: row.get("expires_at"),
-        accepted_at: row.get("accepted_at"),
-        accepted_by: row.get("accepted_by"),
-        created_at: row.get("created_at"),
     }
 }
 

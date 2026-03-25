@@ -609,18 +609,6 @@ CREATE TABLE IF NOT EXISTS api_tokens (
 CREATE INDEX IF NOT EXISTS idx_api_tokens_user ON api_tokens(user_id);
 CREATE INDEX IF NOT EXISTS idx_api_tokens_hash ON api_tokens(token_hash);
 
-CREATE TABLE IF NOT EXISTS invitations (
-    id TEXT PRIMARY KEY,
-    email TEXT,
-    invite_token_hash BLOB NOT NULL,
-    invited_by TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'pending',
-    expires_at TEXT NOT NULL,
-    accepted_at TEXT,
-    accepted_by TEXT,
-    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-);
-
 "#;
 
 /// Incremental migrations applied after the base schema.
@@ -797,18 +785,6 @@ CREATE TABLE IF NOT EXISTS api_tokens (
 );
 CREATE INDEX IF NOT EXISTS idx_api_tokens_user ON api_tokens(user_id);
 CREATE INDEX IF NOT EXISTS idx_api_tokens_hash ON api_tokens(token_hash);
-
-CREATE TABLE IF NOT EXISTS invitations (
-    id TEXT PRIMARY KEY,
-    email TEXT,
-    invite_token_hash BLOB NOT NULL,
-    invited_by TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'pending',
-    expires_at TEXT NOT NULL,
-    accepted_at TEXT,
-    accepted_by TEXT,
-    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-);
 "#,
     ),
 ];

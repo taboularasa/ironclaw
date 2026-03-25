@@ -16,8 +16,8 @@ use crate::agent::routine::{Routine, RoutineRun, RunStatus};
 use crate::config::DatabaseConfig;
 use crate::context::{ActionRecord, JobContext, JobState};
 use crate::db::{
-    ApiTokenRecord, ConversationStore, Database, InvitationRecord, JobStore, RoutineStore,
-    SandboxStore, SettingsStore, ToolFailureStore, UserRecord, UserStore, WorkspaceStore,
+    ApiTokenRecord, ConversationStore, Database, JobStore, RoutineStore, SandboxStore,
+    SettingsStore, ToolFailureStore, UserRecord, UserStore, WorkspaceStore,
 };
 use crate::error::{DatabaseError, WorkspaceError};
 use crate::history::{
@@ -856,32 +856,6 @@ impl UserStore for PgBackend {
 
     async fn record_token_usage(&self, token_id: Uuid) -> Result<(), DatabaseError> {
         self.store.record_token_usage(token_id).await
-    }
-
-    async fn create_invitation(
-        &self,
-        invitation: &InvitationRecord,
-        invite_hash: &[u8; 32],
-    ) -> Result<(), DatabaseError> {
-        self.store.create_invitation(invitation, invite_hash).await
-    }
-
-    async fn get_invitation_by_hash(
-        &self,
-        invite_hash: &[u8; 32],
-    ) -> Result<Option<InvitationRecord>, DatabaseError> {
-        self.store.get_invitation_by_hash(invite_hash).await
-    }
-
-    async fn accept_invitation(&self, id: Uuid, accepted_by: &str) -> Result<(), DatabaseError> {
-        self.store.accept_invitation(id, accepted_by).await
-    }
-
-    async fn list_invitations(
-        &self,
-        invited_by: Option<&str>,
-    ) -> Result<Vec<InvitationRecord>, DatabaseError> {
-        self.store.list_invitations(invited_by).await
     }
 
     async fn has_any_users(&self) -> Result<bool, DatabaseError> {

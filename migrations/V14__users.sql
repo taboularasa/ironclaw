@@ -29,15 +29,3 @@ CREATE TABLE api_tokens (
 );
 CREATE INDEX idx_api_tokens_user ON api_tokens(user_id);
 CREATE INDEX idx_api_tokens_hash ON api_tokens(token_hash);
-
-CREATE TABLE invitations (
-    id UUID PRIMARY KEY,
-    email TEXT,                                  -- nullable for link-based invites
-    invite_token_hash BYTEA NOT NULL,           -- SHA-256 hash of the invite link token
-    invited_by TEXT NOT NULL REFERENCES users(id),
-    status TEXT NOT NULL DEFAULT 'pending',      -- pending | accepted | expired | revoked
-    expires_at TIMESTAMPTZ NOT NULL,
-    accepted_at TIMESTAMPTZ,
-    accepted_by TEXT REFERENCES users(id),
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);

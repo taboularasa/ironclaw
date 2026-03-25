@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use super::{fmt_opt_ts, fmt_ts, get_opt_text, get_opt_ts, get_text, get_ts, opt_text};
 use crate::db::libsql::LibSqlBackend;
-use crate::db::{ApiTokenRecord, DatabaseError, InvitationRecord, UserRecord, UserStore};
+use crate::db::{ApiTokenRecord, DatabaseError, UserRecord, UserStore};
 
 fn row_to_user(row: &libsql::Row) -> Result<UserRecord, DatabaseError> {
     let metadata_str = get_text(row, 9);
@@ -41,23 +41,6 @@ fn row_to_api_token(row: &libsql::Row) -> Result<ApiTokenRecord, DatabaseError> 
         last_used_at: get_opt_ts(row, 5),
         created_at: get_ts(row, 6),
         revoked_at: get_opt_ts(row, 7),
-    })
-}
-
-fn row_to_invitation(row: &libsql::Row) -> Result<InvitationRecord, DatabaseError> {
-    let id_str = get_text(row, 0);
-    let id: Uuid = id_str
-        .parse()
-        .map_err(|e| DatabaseError::Serialization(format!("invalid UUID: {e}")))?;
-    Ok(InvitationRecord {
-        id,
-        email: get_opt_text(row, 1),
-        invited_by: get_text(row, 2),
-        status: get_text(row, 3),
-        expires_at: get_ts(row, 4),
-        accepted_at: get_opt_ts(row, 5),
-        accepted_by: get_opt_text(row, 6),
-        created_at: get_ts(row, 7),
     })
 }
 
@@ -388,119 +371,6 @@ impl UserStore for LibSqlBackend {
         Ok(())
     }
 
-    async fn create_invitation(
-        &self,
-        invitation: &InvitationRecord,
-        invite_hash: &[u8; 32],
-    ) -> Result<(), DatabaseError> {
-        let conn = self.connect().await?;
-        conn.execute(
-            r#"
-            INSERT INTO invitations (id, email, invite_token_hash, invited_by, status, expires_at, accepted_at, accepted_by, created_at)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
-            "#,
-            params![
-                invitation.id.to_string(),
-                opt_text(invitation.email.as_deref()),
-                libsql::Value::Blob(invite_hash.to_vec()),
-                invitation.invited_by.as_str(),
-                invitation.status.as_str(),
-                fmt_ts(&invitation.expires_at),
-                fmt_opt_ts(&invitation.accepted_at),
-                opt_text(invitation.accepted_by.as_deref()),
-                fmt_ts(&invitation.created_at),
-            ],
-        )
-        .await
-        .map_err(|e| DatabaseError::Query(e.to_string()))?;
-        Ok(())
-    }
-
-    async fn get_invitation_by_hash(
-        &self,
-        invite_hash: &[u8; 32],
-    ) -> Result<Option<InvitationRecord>, DatabaseError> {
-        let conn = self.connect().await?;
-        let mut rows = conn
-            .query(
-                r#"
-                SELECT id, email, invited_by, status, expires_at, accepted_at, accepted_by, created_at
-                FROM invitations
-                WHERE invite_token_hash = ?1
-                  AND status = 'pending'
-                  AND expires_at > strftime('%Y-%m-%dT%H:%M:%S', 'now')
-                "#,
-                params![libsql::Value::Blob(invite_hash.to_vec())],
-            )
-            .await
-            .map_err(|e| DatabaseError::Query(e.to_string()))?;
-
-        match rows
-            .next()
-            .await
-            .map_err(|e| DatabaseError::Query(e.to_string()))?
-        {
-            Some(row) => Ok(Some(row_to_invitation(&row)?)),
-            None => Ok(None),
-        }
-    }
-
-    async fn accept_invitation(&self, id: Uuid, accepted_by: &str) -> Result<(), DatabaseError> {
-        let conn = self.connect().await?;
-        let now = fmt_ts(&Utc::now());
-        conn.execute(
-            r#"
-            UPDATE invitations SET status = 'accepted', accepted_at = ?2, accepted_by = ?3
-            WHERE id = ?1
-            "#,
-            params![id.to_string(), now, accepted_by],
-        )
-        .await
-        .map_err(|e| DatabaseError::Query(e.to_string()))?;
-        Ok(())
-    }
-
-    async fn list_invitations(
-        &self,
-        invited_by: Option<&str>,
-    ) -> Result<Vec<InvitationRecord>, DatabaseError> {
-        let conn = self.connect().await?;
-        let mut invitations = Vec::new();
-
-        let mut rows = if let Some(invited_by) = invited_by {
-            conn.query(
-                r#"
-                SELECT id, email, invited_by, status, expires_at, accepted_at, accepted_by, created_at
-                FROM invitations WHERE invited_by = ?1
-                ORDER BY created_at DESC
-                "#,
-                params![invited_by],
-            )
-            .await
-            .map_err(|e| DatabaseError::Query(e.to_string()))?
-        } else {
-            conn.query(
-                r#"
-                SELECT id, email, invited_by, status, expires_at, accepted_at, accepted_by, created_at
-                FROM invitations
-                ORDER BY created_at DESC
-                "#,
-                (),
-            )
-            .await
-            .map_err(|e| DatabaseError::Query(e.to_string()))?
-        };
-
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|e| DatabaseError::Query(e.to_string()))?
-        {
-            invitations.push(row_to_invitation(&row)?);
-        }
-        Ok(invitations)
-    }
-
     async fn has_any_users(&self) -> Result<bool, DatabaseError> {
         let conn = self.connect().await?;
         let mut rows = conn
@@ -692,76 +562,6 @@ mod tests {
 
         // Alice can
         assert!(db.revoke_api_token(record.id, "alice").await.unwrap());
-    }
-
-    #[tokio::test]
-    async fn test_invitation_lifecycle() {
-        let (db, _dir) = setup().await;
-        db.create_user(&test_user("alice")).await.unwrap();
-
-        // Create invitation
-        let invite_hash = hash("invite-token-xyz");
-        let invitation = InvitationRecord {
-            id: Uuid::new_v4(),
-            email: Some("newuser@test.com".to_string()),
-            invited_by: "alice".to_string(),
-            status: "pending".to_string(),
-            expires_at: Utc::now() + chrono::Duration::days(7),
-            accepted_at: None,
-            accepted_by: None,
-            created_at: Utc::now(),
-        };
-        db.create_invitation(&invitation, &invite_hash)
-            .await
-            .unwrap();
-
-        // Look up by hash
-        let found = db
-            .get_invitation_by_hash(&invite_hash)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(found.id, invitation.id);
-        assert_eq!(found.status, "pending");
-
-        // List invitations
-        let list = db.list_invitations(Some("alice")).await.unwrap();
-        assert_eq!(list.len(), 1);
-
-        // Accept
-        db.create_user(&UserRecord {
-            id: "newuser".to_string(),
-            email: Some("newuser@test.com".to_string()),
-            display_name: "New User".to_string(),
-            status: "active".to_string(),
-            role: "member".to_string(),
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-            last_login_at: None,
-            created_by: Some("alice".to_string()),
-            metadata: serde_json::json!({}),
-        })
-        .await
-        .unwrap();
-        db.accept_invitation(invitation.id, "newuser")
-            .await
-            .unwrap();
-
-        // After acceptance, the invitation should no longer be found via hash
-        // lookup (which filters for status='pending')
-        assert!(
-            db.get_invitation_by_hash(&invite_hash)
-                .await
-                .unwrap()
-                .is_none(),
-            "Accepted invitation should not be returned by pending-only lookup"
-        );
-
-        // Verify via list that it was accepted
-        let all = db.list_invitations(Some("alice")).await.unwrap();
-        assert_eq!(all.len(), 1);
-        assert_eq!(all[0].status, "accepted");
-        assert_eq!(all[0].accepted_by, Some("newuser".to_string()));
     }
 
     #[tokio::test]

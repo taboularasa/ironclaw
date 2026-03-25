@@ -346,20 +346,6 @@ pub struct ApiTokenRecord {
     pub revoked_at: Option<DateTime<Utc>>,
 }
 
-/// A pending invitation to create an account.
-#[derive(Debug, Clone)]
-pub struct InvitationRecord {
-    pub id: Uuid,
-    pub email: Option<String>,
-    pub invited_by: String,
-    /// `pending`, `accepted`, `expired`, or `revoked`.
-    pub status: String,
-    pub expires_at: DateTime<Utc>,
-    pub accepted_at: Option<DateTime<Utc>>,
-    pub accepted_by: Option<String>,
-    pub created_at: DateTime<Utc>,
-}
-
 // ==================== Sub-traits ====================
 //
 // Each sub-trait groups related persistence methods. The `Database` supertrait
@@ -860,26 +846,6 @@ pub trait UserStore: Send + Sync {
     /// Update `last_used_at` for a token.
     async fn record_token_usage(&self, token_id: Uuid) -> Result<(), DatabaseError>;
 
-    // ---- Invitations ----
-
-    /// Create a new invitation.
-    async fn create_invitation(
-        &self,
-        invitation: &InvitationRecord,
-        invite_hash: &[u8; 32],
-    ) -> Result<(), DatabaseError>;
-    /// Look up a pending invitation by its hashed token.
-    async fn get_invitation_by_hash(
-        &self,
-        invite_hash: &[u8; 32],
-    ) -> Result<Option<InvitationRecord>, DatabaseError>;
-    /// Accept an invitation (sets status=accepted, accepted_by, accepted_at).
-    async fn accept_invitation(&self, id: Uuid, accepted_by: &str) -> Result<(), DatabaseError>;
-    /// List invitations, optionally filtered by inviter.
-    async fn list_invitations(
-        &self,
-        invited_by: Option<&str>,
-    ) -> Result<Vec<InvitationRecord>, DatabaseError>;
     /// Check whether any user records exist (for first-run bootstrap detection).
     async fn has_any_users(&self) -> Result<bool, DatabaseError>;
 }
