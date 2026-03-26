@@ -1,14 +1,14 @@
 //! TLS connector factory for PostgreSQL connections.
 //!
 //! Builds a [`deadpool_postgres::Pool`] with the appropriate TLS connector
-//! based on the configured [`SslMode`].  Uses `native-tls` which delegates
-//! to the platform's TLS library (OpenSSL on Linux, Secure Transport on macOS,
-//! SChannel on Windows).
+//! based on the configured [`SslMode`].  Uses `rustls` with system root
+//! certificates, falling back to Mozilla's bundled roots via `webpki-roots`
+//! when the system store is empty (common in minimal container images).
 
 use deadpool_postgres::{Pool, Runtime};
-use postgres_native_tls::MakeTlsConnector;
 use thiserror::Error;
 use tokio_postgres::NoTls;
+use tokio_postgres_rustls::MakeRustlsConnect;
 
 use crate::config::SslMode;
 
@@ -17,21 +17,50 @@ pub enum CreatePoolError {
     #[error("{0}")]
     Pool(#[from] deadpool_postgres::CreatePoolError),
     #[error("postgres TLS configuration failed: {0}")]
-    TlsConfig(#[from] native_tls::Error),
+    TlsConfig(#[from] rustls::Error),
 }
 
-/// Build a native-tls connector using the platform's certificate store.
-fn make_tls_connector() -> Result<MakeTlsConnector, native_tls::Error> {
-    let tls_connector = native_tls::TlsConnector::builder()
-        .danger_accept_invalid_certs(false)
-        .build()?;
-    Ok(MakeTlsConnector::new(tls_connector))
+/// Build a rustls-based TLS connector.
+///
+/// Tries the platform's native certificate store first. If that yields zero
+/// certificates (slim container images, missing ca-certificates package),
+/// falls back to Mozilla's root certificates bundled via `webpki-roots`.
+fn make_rustls_connector() -> Result<MakeRustlsConnect, rustls::Error> {
+    let mut root_store = rustls::RootCertStore::empty();
+
+    // Try native certs first.
+    let native = rustls_native_certs::load_native_certs();
+    for e in &native.errors {
+        tracing::warn!("error loading system root certs: {e}");
+    }
+    for cert in native.certs {
+        if let Err(e) = root_store.add(cert) {
+            tracing::warn!("skipping invalid system root cert: {e}");
+        }
+    }
+
+    // Fall back to bundled Mozilla roots when the system store is empty.
+    if root_store.is_empty() {
+        tracing::info!(
+            "no system root certificates found, using bundled Mozilla roots"
+        );
+        root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    }
+
+    // Pick the ring crypto provider (same one reqwest uses).
+    let config = rustls::ClientConfig::builder_with_provider(
+        rustls::crypto::ring::default_provider().into(),
+    )
+    .with_safe_default_protocol_versions()?
+    .with_root_certificates(root_store)
+    .with_no_client_auth();
+    Ok(MakeRustlsConnect::new(config))
 }
 
 /// Create a [`deadpool_postgres::Pool`] with the appropriate TLS connector.
 ///
 /// - `Disable` → plain TCP (no TLS)
-/// - `Prefer` / `Require` → native-tls with platform certificate store
+/// - `Prefer` / `Require` → rustls with system or bundled root certificates
 ///
 /// **Note:** `Prefer` and `Require` currently behave identically — both
 /// provide a TLS connector and will fail if the server rejects the TLS
@@ -48,7 +77,7 @@ pub fn create_pool(
             .create_pool(Some(Runtime::Tokio1), NoTls)
             .map_err(CreatePoolError::from),
         SslMode::Prefer | SslMode::Require => {
-            let tls = make_tls_connector()?;
+            let tls = make_rustls_connector()?;
             config
                 .create_pool(Some(Runtime::Tokio1), tls)
                 .map_err(CreatePoolError::from)
