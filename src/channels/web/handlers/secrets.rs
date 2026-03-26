@@ -27,6 +27,18 @@ pub async fn secrets_put_handler(
     Path((user_id, name)): Path<(String, String)>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let name = name.to_lowercase();
+
+    let store = state.store.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Database not available".to_string(),
+    ))?;
+    store
+        .get_user(&user_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((StatusCode::NOT_FOUND, "User not found".to_string()))?;
+
     let secrets = state.secrets_store.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         "Secrets store not available".to_string(),
@@ -67,7 +79,7 @@ pub async fn secrets_put_handler(
 
     Ok(Json(serde_json::json!({
         "user_id": user_id,
-        "name": name.to_lowercase(),
+        "name": name,
         "status": "created",
     })))
 }
@@ -112,6 +124,18 @@ pub async fn secrets_delete_handler(
     AdminUser(_admin): AdminUser,
     Path((user_id, name)): Path<(String, String)>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let name = name.to_lowercase();
+
+    let store = state.store.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Database not available".to_string(),
+    ))?;
+    store
+        .get_user(&user_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((StatusCode::NOT_FOUND, "User not found".to_string()))?;
+
     let secrets = state.secrets_store.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         "Secrets store not available".to_string(),

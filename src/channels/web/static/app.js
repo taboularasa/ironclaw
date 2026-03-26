@@ -4352,13 +4352,16 @@ function loadUsers() {
   apiFetch('/api/admin/users').then(function(data) {
     renderUsersList(data.users || []);
   }).catch(function(err) {
-    // Non-admin users get 403 — show a message instead of an error
     var tbody = document.getElementById('users-tbody');
     var empty = document.getElementById('users-empty');
     if (tbody) tbody.innerHTML = '';
     if (empty) {
       empty.style.display = 'block';
-      empty.textContent = 'Admin access required to manage users.';
+      if (err.status === 403 || err.status === 401) {
+        empty.textContent = 'Admin access required to manage users.';
+      } else {
+        empty.textContent = 'Failed to load users: ' + err.message;
+      }
     }
   });
 }

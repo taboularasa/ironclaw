@@ -529,7 +529,7 @@ All error responses return a plain text body with the error message and the corr
 
 | Column | Type (PG / libSQL) | Notes |
 |--------|--------------------|-------|
-| `id` | `UUID` / `TEXT` | Primary key, UUID v4 |
+| `id` | `TEXT` / `TEXT` | Primary key; values are UUID v4 strings |
 | `email` | `TEXT UNIQUE` | Nullable |
 | `display_name` | `TEXT NOT NULL` | |
 | `status` | `TEXT NOT NULL` | `"active"` or `"suspended"` |

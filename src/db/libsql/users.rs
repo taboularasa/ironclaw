@@ -487,7 +487,9 @@ impl UserStore for LibSqlBackend {
             .map_err(|e| DatabaseError::Query(e.to_string()))?
         {
             let cost_str = get_text(&row, 5);
-            let total_cost = rust_decimal::Decimal::from_str_exact(&cost_str).unwrap_or_default();
+            let total_cost = rust_decimal::Decimal::from_str_exact(&cost_str).map_err(|e| {
+                DatabaseError::Query(format!("invalid cost value '{}': {}", cost_str, e))
+            })?;
             stats.push(crate::db::UserUsageStats {
                 user_id: get_text(&row, 0),
                 model: get_text(&row, 1),
@@ -555,7 +557,9 @@ impl UserStore for LibSqlBackend {
             .map_err(|e| DatabaseError::Query(e.to_string()))?
         {
             let cost_str = get_text(&row, 2);
-            let total_cost = rust_decimal::Decimal::from_str_exact(&cost_str).unwrap_or_default();
+            let total_cost = rust_decimal::Decimal::from_str_exact(&cost_str).map_err(|e| {
+                DatabaseError::Query(format!("invalid cost value '{}': {}", cost_str, e))
+            })?;
             stats.push(crate::db::UserSummaryStats {
                 user_id: get_text(&row, 0),
                 job_count: row

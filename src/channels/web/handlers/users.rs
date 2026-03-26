@@ -119,7 +119,10 @@ pub async fn users_list_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     // Fetch per-user summary stats in a single batch query.
-    let summary_stats = store.user_summary_stats(None).await.unwrap_or_default();
+    let summary_stats = store
+        .user_summary_stats(None)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     let stats_map: std::collections::HashMap<String, _> = summary_stats
         .into_iter()
