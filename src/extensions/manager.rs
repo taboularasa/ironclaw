@@ -1344,6 +1344,7 @@ impl ExtensionManager {
                             tools,
                             needs_setup: false,
                             has_auth: false,
+                            requires_binding: false,
                             installed: true,
                             activation_error: None,
                             version: None,
@@ -1395,6 +1396,7 @@ impl ExtensionManager {
                             tools: if active { vec![name] } else { Vec::new() },
                             needs_setup: auth_state == ToolAuthState::NeedsSetup,
                             has_auth: auth_state != ToolAuthState::NoAuth,
+                            requires_binding: false,
                             installed: true,
                             activation_error: None,
                             version,
@@ -1424,20 +1426,25 @@ impl ExtensionManager {
                             .get_with_kind(&name, Some(ExtensionKind::WasmChannel))
                             .await;
                         let display_name = registry_entry.as_ref().map(|e| e.display_name.clone());
-                        let version = if let Some(ref cap_path) = discovered.capabilities_path {
-                            tokio::fs::read(cap_path)
-                                .await
-                                .ok()
-                                .and_then(|bytes| {
-                                    crate::channels::wasm::ChannelCapabilitiesFile::from_bytes(
-                                        &bytes,
-                                    )
+                        let (version, requires_binding) =
+                            if let Some(ref cap_path) = discovered.capabilities_path {
+                                tokio::fs::read(cap_path)
+                                    .await
                                     .ok()
-                                })
-                                .and_then(|cap| cap.version)
-                        } else {
-                            None
-                        };
+                                    .and_then(|bytes| {
+                                        crate::channels::wasm::ChannelCapabilitiesFile::from_bytes(
+                                            &bytes,
+                                        )
+                                        .ok()
+                                    })
+                                    .map(|cap| {
+                                        let requires_binding = cap.requires_binding();
+                                        (cap.version, requires_binding)
+                                    })
+                            } else {
+                                None
+                            }
+                            .unwrap_or((None, false));
                         let version =
                             version.or_else(|| registry_entry.and_then(|e| e.version.clone()));
                         extensions.push(InstalledExtension {
@@ -1451,6 +1458,7 @@ impl ExtensionManager {
                             tools: Vec::new(),
                             needs_setup: auth_state == ToolAuthState::NeedsSetup,
                             has_auth: auth_state != ToolAuthState::NoAuth,
+                            requires_binding,
                             installed: true,
                             activation_error,
                             version,
@@ -1489,6 +1497,7 @@ impl ExtensionManager {
                     tools: Vec::new(),
                     needs_setup: false,
                     has_auth: true,
+                    requires_binding: false,
                     installed: true,
                     activation_error,
                     version: None,
@@ -1523,6 +1532,7 @@ impl ExtensionManager {
                     tools: Vec::new(),
                     needs_setup: false,
                     has_auth: false,
+                    requires_binding: false,
                     installed: false,
                     activation_error: None,
                     version: entry.version,

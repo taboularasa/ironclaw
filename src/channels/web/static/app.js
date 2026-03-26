@@ -3058,12 +3058,12 @@ function showConfigureModal(name) {
       const setupFields = Array.isArray(setup.fields) ? setup.fields : [];
       const interactiveLogin = setup.interactive_login || null;
       if (secrets.length === 0 && setupFields.length === 0 && !interactiveLogin) {
-        showToast('No configuration needed for ' + name, 'info');
+        showToast(I18n.t('extensions.noConfigNeeded', { name: name }), 'info');
         return;
       }
       renderConfigureModal(name, secrets, setupFields, interactiveLogin);
     })
-    .catch((err) => showToast('Failed to load setup: ' + err.message, 'error'));
+    .catch((err) => showToast(I18n.t('error.loadFailed', { message: err.message }), 'error'));
 }
 
 function renderConfigureModal(name, secrets, setupFields, interactiveLogin) {
@@ -3092,10 +3092,10 @@ function renderConfigureModal(name, secrets, setupFields, interactiveLogin) {
     modal.appendChild(hint);
   }
 
-  if (interactiveLogin && interactiveLogin.instructions) {
+  if (interactiveLogin) {
     const hint = document.createElement('div');
     hint.className = 'configure-hint';
-    hint.textContent = interactiveLogin.instructions;
+    hint.textContent = interactiveLoginHintText(name, interactiveLogin);
     modal.appendChild(hint);
   }
 
@@ -3193,7 +3193,7 @@ function renderConfigureModal(name, secrets, setupFields, interactiveLogin) {
   }
 
   if (interactiveLogin) {
-    modal.appendChild(renderInteractiveLoginPanel());
+    modal.appendChild(renderInteractiveLoginPanel(name));
   }
 
   const error = document.createElement('div');
@@ -3220,7 +3220,8 @@ function renderConfigureModal(name, secrets, setupFields, interactiveLogin) {
   if (interactiveLogin) {
     const loginBtn = document.createElement('button');
     loginBtn.className = 'btn-ext activate';
-    loginBtn.textContent = interactiveLogin.button_label || 'Connect';
+    loginBtn.dataset.defaultLabel = interactiveLoginDefaultLabel(name, interactiveLogin);
+    loginBtn.textContent = loginBtn.dataset.defaultLabel;
     loginBtn.dataset.interactiveLogin = 'true';
     loginBtn.addEventListener('click', () => startInteractiveLogin(name, overlay));
     actions.appendChild(loginBtn);
@@ -3244,25 +3245,27 @@ function renderConfigureModal(name, secrets, setupFields, interactiveLogin) {
   }
 }
 
-function renderInteractiveLoginPanel() {
+function renderInteractiveLoginPanel(name) {
   const panel = document.createElement('div');
   panel.className = 'configure-qr-login';
   panel.style.display = 'none';
 
   const title = document.createElement('div');
   title.className = 'configure-verification-title';
-  title.textContent = 'Open WeChat QR Page';
+  title.textContent =
+    name === 'wechat' ? I18n.t('config.wechatQrTitle') : I18n.t('auth.connect');
   panel.appendChild(title);
 
   const status = document.createElement('div');
   status.className = 'configure-verification-instructions';
-  status.textContent = 'The QR flow opens in a separate tab.';
+  status.textContent = interactiveLoginStatusText(name, null);
   status.dataset.qrStatus = 'true';
   panel.appendChild(status);
 
   const link = document.createElement('a');
   link.className = 'configure-verification-link';
-  link.textContent = 'Open QR Page';
+  link.textContent =
+    name === 'wechat' ? I18n.t('config.wechatQrOpen') : I18n.t('auth.connect');
   link.target = '_blank';
   link.rel = 'noreferrer noopener';
   link.style.display = 'none';
@@ -3270,6 +3273,41 @@ function renderInteractiveLoginPanel() {
   panel.appendChild(link);
 
   return panel;
+}
+
+function interactiveLoginHintText(name, interactiveLogin) {
+  if (name === 'wechat') return I18n.t('config.wechatHint');
+  return (interactiveLogin && interactiveLogin.instructions) || '';
+}
+
+function interactiveLoginDefaultLabel(name, interactiveLogin) {
+  if (name === 'wechat') return I18n.t('config.wechatConnect');
+  return (interactiveLogin && interactiveLogin.button_label) || I18n.t('auth.connect');
+}
+
+function interactiveLoginWaitingLabel(name) {
+  if (name === 'wechat') return I18n.t('config.wechatWaiting');
+  return I18n.t('status.connecting');
+}
+
+function interactiveLoginStatusText(name, res) {
+  if (name !== 'wechat') return (res && res.message) || '';
+  if (!res) return I18n.t('config.wechatQrIntro');
+
+  switch (res.status) {
+    case 'pending':
+      return res.qr_code_url ? I18n.t('config.wechatQrReady') : I18n.t('config.wechatQrWaiting');
+    case 'scanned':
+      return I18n.t('config.wechatQrScanned');
+    case 'refreshed':
+      return I18n.t('config.wechatQrRefreshed');
+    case 'succeeded':
+      return I18n.t('config.wechatConnected');
+    case 'failed':
+      return res.message || I18n.t('config.wechatQrFailed');
+    default:
+      return res.message || I18n.t('config.wechatQrIntro');
+  }
 }
 
 function getInteractiveLoginButton(overlay) {
@@ -3283,14 +3321,17 @@ function getInteractiveLoginPanel(overlay) {
 function updateInteractiveLoginPanel(overlay, res) {
   const panel = getInteractiveLoginPanel(overlay);
   if (!panel) return;
+  const name = overlay && overlay.dataset ? overlay.dataset.extensionName : '';
   const status = panel.querySelector('[data-qr-status="true"]');
   const link = panel.querySelector('[data-qr-link="true"]');
 
   panel.style.display = '';
   if (status) {
-    status.textContent = res.status === 'refreshed'
-      ? 'The QR page was refreshed. Open it again if needed.'
-      : 'The QR flow opens in a separate tab.';
+    if (name === 'wechat' && res.status === 'refreshed') {
+      status.textContent = I18n.t('config.wechatQrRefreshedHint');
+    } else {
+      status.textContent = interactiveLoginStatusText(name, res);
+    }
   }
 
   if (link && res.qr_code_url) {
@@ -3303,16 +3344,17 @@ function setInteractiveLoginBusy(overlay, busy, label) {
   const loginBtn = getInteractiveLoginButton(overlay);
   if (!loginBtn) return;
   loginBtn.disabled = !!busy;
-  if (label) {
-    loginBtn.textContent = label;
-  }
+  loginBtn.textContent = label || loginBtn.dataset.defaultLabel || I18n.t('auth.connect');
 }
 
 function startInteractiveLogin(name, overlay) {
   if (!overlay || !document.body.contains(overlay)) return;
   clearConfigureInlineError(overlay);
-  setConfigureInlineStatus(overlay, 'Preparing WeChat QR page...');
-  setInteractiveLoginBusy(overlay, true, 'Waiting for scan...');
+  setConfigureInlineStatus(
+    overlay,
+    name === 'wechat' ? I18n.t('config.wechatPreparingQr') : I18n.t('status.connecting'),
+  );
+  setInteractiveLoginBusy(overlay, true, interactiveLoginWaitingLabel(name));
 
   apiFetch('/api/extensions/' + encodeURIComponent(name) + '/login/start', {
     method: 'POST',
@@ -3321,21 +3363,27 @@ function startInteractiveLogin(name, overlay) {
     .then((res) => {
       if (!overlay || !document.body.contains(overlay)) return;
       if (!res.success || !res.session_id) {
-        setInteractiveLoginBusy(overlay, false, 'Connect WeChat');
-        setConfigureInlineError(overlay, res.message || 'Failed to start interactive login');
+        setInteractiveLoginBusy(overlay, false);
+        setConfigureInlineError(
+          overlay,
+          res.message || I18n.t('config.interactiveLoginStartFailed'),
+        );
         setConfigureInlineStatus(overlay, '');
         return;
       }
 
       overlay.dataset.interactiveLoginSessionId = res.session_id;
       updateInteractiveLoginPanel(overlay, res);
-      setConfigureInlineStatus(overlay, res.message || '');
+      setConfigureInlineStatus(overlay, interactiveLoginStatusText(name, res));
       pollInteractiveLogin(name, overlay, res.session_id);
     })
     .catch((err) => {
       if (!overlay || !document.body.contains(overlay)) return;
-      setInteractiveLoginBusy(overlay, false, 'Connect WeChat');
-      setConfigureInlineError(overlay, err.message || 'Failed to start interactive login');
+      setInteractiveLoginBusy(overlay, false);
+      setConfigureInlineError(
+        overlay,
+        err.message || I18n.t('config.interactiveLoginStartFailed'),
+      );
       setConfigureInlineStatus(overlay, '');
     });
 }
@@ -3352,16 +3400,12 @@ function pollInteractiveLogin(name, overlay, sessionId) {
       if (!overlay || !document.body.contains(overlay)) return;
       if (overlay.dataset.interactiveLoginSessionId !== sessionId) return;
 
-      if (res.qr_code_url) {
-        updateInteractiveLoginPanel(overlay, res);
-      }
-      if (res.message) {
-        setConfigureInlineStatus(overlay, res.message);
-      }
+      updateInteractiveLoginPanel(overlay, res);
+      setConfigureInlineStatus(overlay, interactiveLoginStatusText(name, res));
 
       if (res.status === 'pending' || res.status === 'scanned' || res.status === 'refreshed') {
         if (res.status === 'refreshed') {
-          setInteractiveLoginBusy(overlay, true, 'Waiting for scan...');
+          setInteractiveLoginBusy(overlay, true, interactiveLoginWaitingLabel(name));
         }
         window.setTimeout(function() {
           pollInteractiveLogin(name, overlay, sessionId);
@@ -3371,20 +3415,20 @@ function pollInteractiveLogin(name, overlay, sessionId) {
 
       if (res.success && res.activated) {
         closeConfigureModal(name);
-        showToast(res.message || (name + ' connected successfully'), 'success');
+        showToast(res.message || I18n.t('config.connectedSuccess', { name: name }), 'success');
         refreshCurrentSettingsTab();
         return;
       }
 
-      setInteractiveLoginBusy(overlay, false, 'Connect WeChat');
-      setConfigureInlineError(overlay, res.message || 'Interactive login failed');
+      setInteractiveLoginBusy(overlay, false);
+      setConfigureInlineError(overlay, res.message || I18n.t('config.interactiveLoginFailed'));
       setConfigureInlineStatus(overlay, '');
     })
     .catch((err) => {
       if (!overlay || !document.body.contains(overlay)) return;
       if (overlay.dataset.interactiveLoginSessionId !== sessionId) return;
-      setInteractiveLoginBusy(overlay, false, 'Connect WeChat');
-      setConfigureInlineError(overlay, err.message || 'Interactive login failed');
+      setInteractiveLoginBusy(overlay, false);
+      setConfigureInlineError(overlay, err.message || I18n.t('config.interactiveLoginFailed'));
       setConfigureInlineStatus(overlay, '');
     });
 }

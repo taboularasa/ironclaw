@@ -47,6 +47,7 @@ pub async fn extensions_list_handler(
                     &ext,
                     has_paired,
                     owner_bound_channels.contains(&ext.name),
+                    ext.requires_binding,
                 )
             } else if ext.kind == crate::extensions::ExtensionKind::ChannelRelay {
                 Some(if ext.active {

@@ -2050,6 +2050,7 @@ async fn extensions_list_handler(
                     &ext,
                     has_paired,
                     owner_bound_channels.contains(&ext.name),
+                    ext.requires_binding,
                 )
             } else if ext.kind == crate::extensions::ExtensionKind::ChannelRelay {
                 Some(if ext.active {
@@ -2986,12 +2987,13 @@ mod tests {
             tools: Vec::new(),
             needs_setup: true,
             has_auth: false,
+            requires_binding: true,
             installed: true,
             activation_error: None,
             version: None,
         };
 
-        let owner_bound = classify_wasm_channel_activation(&ext, false, true);
+        let owner_bound = classify_wasm_channel_activation(&ext, false, true, ext.requires_binding);
         if owner_bound != Some(ExtensionActivationStatus::Active) {
             return Err(format!(
                 "owner-bound channel should be active, got {:?}",
@@ -2999,7 +3001,7 @@ mod tests {
             ));
         }
 
-        let unbound = classify_wasm_channel_activation(&ext, false, false);
+        let unbound = classify_wasm_channel_activation(&ext, false, false, ext.requires_binding);
         if unbound != Some(ExtensionActivationStatus::Pairing) {
             return Err(format!(
                 "unbound channel should be pairing, got {:?}",
@@ -3023,12 +3025,13 @@ mod tests {
             tools: Vec::new(),
             needs_setup: true,
             has_auth: false,
+            requires_binding: false,
             installed: true,
             activation_error: None,
             version: None,
         };
 
-        let status = classify_wasm_channel_activation(&ext, false, false);
+        let status = classify_wasm_channel_activation(&ext, false, false, ext.requires_binding);
         if status != Some(ExtensionActivationStatus::Active) {
             return Err(format!(
                 "wechat should be active after QR login, got {:?}",
@@ -3052,13 +3055,14 @@ mod tests {
             tools: Vec::new(),
             needs_setup: true,
             has_auth: false,
+            requires_binding: false,
             installed: true,
             activation_error: None,
             version: None,
         };
 
         let status = if relay.kind == crate::extensions::ExtensionKind::WasmChannel {
-            classify_wasm_channel_activation(&relay, false, false)
+            classify_wasm_channel_activation(&relay, false, false, relay.requires_binding)
         } else if relay.kind == crate::extensions::ExtensionKind::ChannelRelay {
             Some(if relay.active {
                 ExtensionActivationStatus::Active

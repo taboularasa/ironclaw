@@ -553,6 +553,10 @@ pub struct InstalledExtension {
     /// Whether this extension has an auth configuration (OAuth or manual token).
     #[serde(default)]
     pub has_auth: bool,
+    /// Whether this extension still needs owner binding / pairing before it should
+    /// be treated as fully active in the UI.
+    #[serde(default)]
+    pub requires_binding: bool,
     /// Whether this extension is installed locally (false = available in registry but not installed).
     #[serde(default = "default_true")]
     pub installed: bool,
@@ -1003,6 +1007,7 @@ mod tests {
             tools: vec!["send_email".to_string(), "read_inbox".to_string()],
             needs_setup: true,
             has_auth: true,
+            requires_binding: false,
             installed: false,
             activation_error: Some("token expired".to_string()),
             version: None,
