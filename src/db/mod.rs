@@ -867,6 +867,17 @@ pub trait UserStore: Send + Sync {
         &self,
         user_id: Option<&str>,
     ) -> Result<Vec<UserSummaryStats>, DatabaseError>;
+
+    /// Create a user and their initial API token atomically.
+    /// If either operation fails, both are rolled back.
+    async fn create_user_with_token(
+        &self,
+        user: &UserRecord,
+        token_name: &str,
+        token_hash: &[u8; 32],
+        token_prefix: &str,
+        expires_at: Option<DateTime<Utc>>,
+    ) -> Result<ApiTokenRecord, DatabaseError>;
 }
 
 /// Per-user LLM usage statistics.

@@ -388,53 +388,74 @@ impl UserStore for LibSqlBackend {
 
     async fn delete_user(&self, id: &str) -> Result<bool, DatabaseError> {
         let conn = self.connect().await?;
-        // Delete from child tables first to avoid FK violations.
-        // agent_jobs cascades to job_actions, llm_calls, estimation_snapshots
-        // conversations cascades to conversation_messages
-        // memory_documents cascades to memory_chunks
-        // routines cascades to routine_runs
-        for table in &[
-            "settings",
-            "heartbeat_state",
-            "tool_rate_limit_state",
-            "secret_usage_log",
-            "leak_detection_events",
-            "secrets",
-            "wasm_tools",
-            "routines",
-            "memory_documents",
-            "conversations",
-            "api_tokens",
-        ] {
+
+        conn.execute("BEGIN", ())
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        let result = async {
+            // Delete from child tables first to avoid FK violations.
+            // agent_jobs cascades to job_actions, llm_calls, estimation_snapshots
+            // conversations cascades to conversation_messages
+            // memory_documents cascades to memory_chunks
+            // routines cascades to routine_runs
+            for table in &[
+                "settings",
+                "heartbeat_state",
+                "tool_rate_limit_state",
+                "secret_usage_log",
+                "leak_detection_events",
+                "secrets",
+                "wasm_tools",
+                "routines",
+                "memory_documents",
+                "conversations",
+                "api_tokens",
+            ] {
+                conn.execute(
+                    &format!("DELETE FROM {} WHERE user_id = ?1", table),
+                    params![id],
+                )
+                .await
+                .map_err(|e| DatabaseError::Query(e.to_string()))?;
+            }
+            // job_events references agent_jobs(id) without CASCADE — delete via subquery.
             conn.execute(
-                &format!("DELETE FROM {} WHERE user_id = ?1", table),
+                "DELETE FROM job_events WHERE job_id IN (SELECT id FROM agent_jobs WHERE user_id = ?1)",
                 params![id],
             )
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
+            conn.execute("DELETE FROM agent_jobs WHERE user_id = ?1", params![id])
+                .await
+                .map_err(|e| DatabaseError::Query(e.to_string()))?;
+            // Nullify self-referencing created_by before deleting the user
+            conn.execute(
+                "UPDATE users SET created_by = NULL WHERE created_by = ?1",
+                params![id],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+            let rows = conn
+                .execute("DELETE FROM users WHERE id = ?1", params![id])
+                .await
+                .map_err(|e| DatabaseError::Query(e.to_string()))?;
+            Ok::<_, DatabaseError>(rows > 0)
         }
-        // job_events references agent_jobs(id) without CASCADE — delete via subquery.
-        conn.execute(
-            "DELETE FROM job_events WHERE job_id IN (SELECT id FROM agent_jobs WHERE user_id = ?1)",
-            params![id],
-        )
-        .await
-        .map_err(|e| DatabaseError::Query(e.to_string()))?;
-        conn.execute("DELETE FROM agent_jobs WHERE user_id = ?1", params![id])
-            .await
-            .map_err(|e| DatabaseError::Query(e.to_string()))?;
-        // Nullify self-referencing created_by before deleting the user
-        conn.execute(
-            "UPDATE users SET created_by = NULL WHERE created_by = ?1",
-            params![id],
-        )
-        .await
-        .map_err(|e| DatabaseError::Query(e.to_string()))?;
-        let rows = conn
-            .execute("DELETE FROM users WHERE id = ?1", params![id])
-            .await
-            .map_err(|e| DatabaseError::Query(e.to_string()))?;
-        Ok(rows > 0)
+        .await;
+
+        match result {
+            Ok(deleted) => {
+                conn.execute("COMMIT", ())
+                    .await
+                    .map_err(|e| DatabaseError::Query(e.to_string()))?;
+                Ok(deleted)
+            }
+            Err(e) => {
+                let _ = conn.execute("ROLLBACK", ()).await;
+                Err(e)
+            }
+        }
     }
 
     async fn user_usage_stats(
@@ -507,6 +528,90 @@ impl UserStore for LibSqlBackend {
         }
         Ok(stats)
     }
+
+    async fn create_user_with_token(
+        &self,
+        user: &UserRecord,
+        token_name: &str,
+        token_hash: &[u8; 32],
+        token_prefix: &str,
+        expires_at: Option<DateTime<Utc>>,
+    ) -> Result<ApiTokenRecord, DatabaseError> {
+        let conn = self.connect().await?;
+        let metadata_json = serde_json::to_string(&user.metadata)
+            .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
+
+        conn.execute("BEGIN", ())
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        // Insert user
+        if let Err(e) = conn
+            .execute(
+                r#"
+                INSERT INTO users (id, email, display_name, status, role, created_at, updated_at, last_login_at, created_by, metadata)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                "#,
+                params![
+                    user.id.as_str(),
+                    opt_text(user.email.as_deref()),
+                    user.display_name.as_str(),
+                    user.status.as_str(),
+                    user.role.as_str(),
+                    fmt_ts(&user.created_at),
+                    fmt_ts(&user.updated_at),
+                    fmt_opt_ts(&user.last_login_at),
+                    opt_text(user.created_by.as_deref()),
+                    metadata_json,
+                ],
+            )
+            .await
+        {
+            let _ = conn.execute("ROLLBACK", ()).await;
+            return Err(DatabaseError::Query(e.to_string()));
+        }
+
+        // Insert token
+        let id = Uuid::new_v4();
+        let now = Utc::now();
+        if let Err(e) = conn
+            .execute(
+                r#"
+                INSERT INTO api_tokens (id, user_id, token_hash, token_prefix, name, expires_at, created_at)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                "#,
+                params![
+                    id.to_string(),
+                    user.id.as_str(),
+                    libsql::Value::Blob(token_hash.to_vec()),
+                    token_prefix,
+                    token_name,
+                    fmt_opt_ts(&expires_at),
+                    fmt_ts(&now),
+                ],
+            )
+            .await
+        {
+            let _ = conn.execute("ROLLBACK", ()).await;
+            return Err(DatabaseError::Query(e.to_string()));
+        }
+
+        conn.execute("COMMIT", ())
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        Ok(ApiTokenRecord {
+            id,
+            user_id: user.id.clone(),
+            name: token_name.to_string(),
+            token_prefix: token_prefix.to_string(),
+            expires_at,
+            last_used_at: None,
+            created_at: now,
+            revoked_at: None,
+        })
+    }
+
     async fn user_summary_stats(
         &self,
         user_id: Option<&str>,

@@ -2429,6 +2429,71 @@ impl Store {
         })
     }
 
+    /// Create a user and their initial API token atomically in a single transaction.
+    pub async fn create_user_with_token(
+        &self,
+        user: &UserRecord,
+        token_name: &str,
+        token_hash: &[u8; 32],
+        token_prefix: &str,
+        expires_at: Option<DateTime<Utc>>,
+    ) -> Result<ApiTokenRecord, DatabaseError> {
+        let mut conn = self.conn().await?;
+        let tx = conn.transaction().await?;
+
+        tx.execute(
+            r#"
+            INSERT INTO users (id, email, display_name, status, role, created_at, updated_at, last_login_at, created_by, metadata)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            "#,
+            &[
+                &user.id,
+                &user.email,
+                &user.display_name,
+                &user.status,
+                &user.role,
+                &user.created_at,
+                &user.updated_at,
+                &user.last_login_at,
+                &user.created_by,
+                &user.metadata,
+            ],
+        )
+        .await?;
+
+        let id = Uuid::new_v4();
+        let now = Utc::now();
+        tx.execute(
+            r#"
+            INSERT INTO api_tokens (id, user_id, token_hash, token_prefix, name, expires_at, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            "#,
+            &[
+                &id,
+                &user.id,
+                &token_hash.to_vec(),
+                &token_prefix,
+                &token_name,
+                &expires_at,
+                &now,
+            ],
+        )
+        .await?;
+
+        tx.commit().await?;
+
+        Ok(ApiTokenRecord {
+            id,
+            user_id: user.id.clone(),
+            name: token_name.to_string(),
+            token_prefix: token_prefix.to_string(),
+            expires_at,
+            last_used_at: None,
+            created_at: now,
+            revoked_at: None,
+        })
+    }
+
     /// List tokens for a user.
     pub async fn list_api_tokens(
         &self,

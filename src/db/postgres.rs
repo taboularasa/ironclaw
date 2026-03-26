@@ -880,4 +880,17 @@ impl UserStore for PgBackend {
     ) -> Result<Vec<crate::db::UserSummaryStats>, DatabaseError> {
         self.store.user_summary_stats(user_id).await
     }
+
+    async fn create_user_with_token(
+        &self,
+        user: &UserRecord,
+        token_name: &str,
+        token_hash: &[u8; 32],
+        token_prefix: &str,
+        expires_at: Option<DateTime<Utc>>,
+    ) -> Result<ApiTokenRecord, DatabaseError> {
+        self.store
+            .create_user_with_token(user, token_name, token_hash, token_prefix, expires_at)
+            .await
+    }
 }

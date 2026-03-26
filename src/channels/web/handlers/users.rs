@@ -64,19 +64,6 @@ pub async fn users_create_handler(
         metadata: serde_json::json!({}),
     };
 
-    store.create_user(&user_record).await.map_err(|e| {
-        let msg = e.to_string();
-        let lower = msg.to_ascii_lowercase();
-        if lower.contains("unique")
-            || lower.contains("duplicate")
-            || lower.contains("already exists")
-        {
-            (StatusCode::CONFLICT, msg)
-        } else {
-            (StatusCode::INTERNAL_SERVER_ERROR, msg)
-        }
-    })?;
-
     // Generate a first API token so the new user can authenticate immediately.
     // Hash the hex-encoded plaintext (what the user sends as Bearer token),
     // NOT the raw bytes — must match hash_token() in auth.rs.
@@ -86,10 +73,22 @@ pub async fn users_create_handler(
     let token_hash = crate::channels::web::auth::hash_token(&plaintext_token);
     let token_prefix = &plaintext_token[..8];
 
+    // Create user and initial token atomically — if either fails, both roll back.
     let _token_record = store
-        .create_api_token(&user_id, "initial", &token_hash, token_prefix, None)
+        .create_user_with_token(&user_record, "initial", &token_hash, token_prefix, None)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|e| {
+            let msg = e.to_string();
+            let lower = msg.to_ascii_lowercase();
+            if lower.contains("unique")
+                || lower.contains("duplicate")
+                || lower.contains("already exists")
+            {
+                (StatusCode::CONFLICT, msg)
+            } else {
+                (StatusCode::INTERNAL_SERVER_ERROR, msg)
+            }
+        })?;
 
     Ok(Json(serde_json::json!({
         "id": user_record.id,
