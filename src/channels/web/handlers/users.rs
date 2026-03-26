@@ -61,7 +61,10 @@ pub async fn users_create_handler(
         created_at: now,
         updated_at: now,
         last_login_at: None,
-        created_by: Some(user.user_id.clone()),
+        created_by: match store.get_user(&user.user_id).await {
+            Ok(Some(_)) => Some(user.user_id.clone()),
+            _ => None,
+        },
         metadata: serde_json::json!({}),
     };
 
