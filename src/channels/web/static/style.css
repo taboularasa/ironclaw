@@ -4593,6 +4593,12 @@ mark {
   min-width: 180px;
 }
 
+.settings-display-value {
+  font-size: var(--text-sm);
+  color: var(--text);
+  font-family: 'IBM Plex Mono', monospace;
+}
+
 .settings-input {
   padding: 6px 10px;
   background: var(--bg);

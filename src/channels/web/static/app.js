@@ -5035,25 +5035,6 @@ function loadSettingsSubtab(subtab) {
 
 var INFERENCE_SETTINGS = [
   {
-    group: 'cfg.group.llm',
-    settings: [
-      { key: 'llm_backend', label: 'cfg.llm_backend.label', description: 'cfg.llm_backend.desc',
-        type: 'select', options: ['nearai', 'anthropic', 'openai', 'ollama', 'openai_compatible', 'tinfoil', 'bedrock'] },
-      { key: 'selected_model', label: 'cfg.selected_model.label', description: 'cfg.selected_model.desc', type: 'text' },
-      { key: 'ollama_base_url', label: 'cfg.ollama_base_url.label', description: 'cfg.ollama_base_url.desc', type: 'text',
-        showWhen: { key: 'llm_backend', value: 'ollama' } },
-      { key: 'openai_compatible_base_url', label: 'cfg.openai_compatible_base_url.label', description: 'cfg.openai_compatible_base_url.desc', type: 'text',
-        showWhen: { key: 'llm_backend', value: 'openai_compatible' } },
-      { key: 'bedrock_region', label: 'cfg.bedrock_region.label', description: 'cfg.bedrock_region.desc', type: 'text',
-        showWhen: { key: 'llm_backend', value: 'bedrock' } },
-      { key: 'bedrock_cross_region', label: 'cfg.bedrock_cross_region.label', description: 'cfg.bedrock_cross_region.desc',
-        type: 'select', options: ['us', 'eu', 'apac', 'global'],
-        showWhen: { key: 'llm_backend', value: 'bedrock' } },
-      { key: 'bedrock_profile', label: 'cfg.bedrock_profile.label', description: 'cfg.bedrock_profile.desc', type: 'text',
-        showWhen: { key: 'llm_backend', value: 'bedrock' } },
-    ]
-  },
-  {
     group: 'cfg.group.embeddings',
     settings: [
       { key: 'embeddings.enabled', label: 'cfg.embeddings_enabled.label', description: 'cfg.embeddings_enabled.desc', type: 'boolean' },
@@ -5175,28 +5156,51 @@ function loadInferenceSettings() {
   Promise.all([
     apiFetch('/api/settings/export'),
     apiFetch('/api/gateway/status').catch(function() { return {}; }),
-    apiFetch('/v1/models').catch(function() { return { data: [] }; })
   ]).then(function(results) {
     var settings = results[0].settings || {};
     var status = results[1];
-    var modelsData = results[2];
-    var activeValues = {
-      'llm_backend': status.llm_backend,
-      'selected_model': status.llm_model
-    };
-    // Inject available model IDs as suggestions for the selected_model field
-    var modelIds = (modelsData.data || []).map(function(m) { return m.id; }).filter(Boolean);
-    if (modelIds.length > 0) {
-      var llmGroup = INFERENCE_SETTINGS[0];
-      for (var i = 0; i < llmGroup.settings.length; i++) {
-        if (llmGroup.settings[i].key === 'selected_model') {
-          llmGroup.settings[i].suggestions = modelIds;
-          break;
-        }
-      }
-    }
     container.innerHTML = '';
-    renderStructuredSettingsInto(container, INFERENCE_SETTINGS, settings, activeValues);
+
+    // LLM Provider display — derived from active Model Provider
+    var activeBackend = settings['llm_backend'] || status.llm_backend || 'nearai';
+    var activeModel = settings['selected_model'] || status.llm_model || '';
+    var allP = (typeof BUILTIN_PROVIDERS !== 'undefined' ? BUILTIN_PROVIDERS : []);
+    var customP = [];
+    try {
+      var cpVal = settings['llm_custom_providers'];
+      customP = Array.isArray(cpVal) ? cpVal : (cpVal ? JSON.parse(cpVal) : []);
+    } catch (e) { customP = []; }
+    var provider = allP.concat(customP).find(function(p) { return p.id === activeBackend; });
+    var providerName = provider ? (provider.name || provider.id) : activeBackend;
+    if (!activeModel && provider) activeModel = provider.default_model || '';
+
+    var group = document.createElement('div');
+    group.className = 'settings-group';
+    var title = document.createElement('div');
+    title.className = 'settings-group-title';
+    title.textContent = I18n.t('cfg.group.llm');
+    group.appendChild(title);
+
+    var backendRow = document.createElement('div');
+    backendRow.className = 'settings-row';
+    backendRow.innerHTML =
+      '<div class="settings-label-wrap"><label class="settings-label">' + escapeHtml(I18n.t('cfg.llm_backend.label')) + '</label>' +
+      '<div class="settings-description">' + escapeHtml(I18n.t('cfg.llm_backend.desc')) + '</div></div>' +
+      '<div class="settings-display-value">' + escapeHtml(providerName) + '</div>';
+    group.appendChild(backendRow);
+
+    var modelRow = document.createElement('div');
+    modelRow.className = 'settings-row';
+    modelRow.innerHTML =
+      '<div class="settings-label-wrap"><label class="settings-label">' + escapeHtml(I18n.t('cfg.selected_model.label')) + '</label>' +
+      '<div class="settings-description">' + escapeHtml(I18n.t('cfg.selected_model.desc')) + '</div></div>' +
+      '<div class="settings-display-value">' + escapeHtml(activeModel || '\u2014') + '</div>';
+    group.appendChild(modelRow);
+
+    container.appendChild(group);
+
+    // Remaining editable settings (embeddings, etc.)
+    renderStructuredSettingsInto(container, INFERENCE_SETTINGS, settings, {});
     loadConfig();
   }).catch(function(err) {
     container.innerHTML = '<div class="empty-state">' + I18n.t('common.loadFailed') + ': '
@@ -5445,8 +5449,7 @@ function renderStructuredSettingsRow(def, value, activeValue) {
   return row;
 }
 
-var RESTART_REQUIRED_KEYS = ['llm_backend', 'selected_model', 'ollama_base_url', 'openai_compatible_base_url',
-  'bedrock_region', 'bedrock_cross_region', 'bedrock_profile', 'embeddings.enabled', 'embeddings.provider', 'embeddings.model',
+var RESTART_REQUIRED_KEYS = ['embeddings.enabled', 'embeddings.provider', 'embeddings.model',
   'agent.auto_approve_tools', 'tunnel.provider', 'tunnel.public_url', 'gateway.rate_limit', 'gateway.max_connections'];
 
 var _settingsSavedTimers = {};
@@ -6332,6 +6335,7 @@ function setActiveProvider(id) {
       _activeLlmBackend = id;
       _selectedModel = defaultModel || '';
       renderProviders();
+      loadInferenceSettings();
       scrollToProviders();
       document.getElementById('config-restart-notice').style.display = 'flex';
       showToast(I18n.t('config.providerActivated', { name: id }));
@@ -6554,6 +6558,7 @@ document.getElementById('save-provider-btn').addEventListener('click', () => {
       .then(() => {
         if (isActive) _selectedModel = model;
         renderProviders();
+        if (isActive) loadInferenceSettings();
         resetProviderForm();
         scrollToProviders();
         if (isActive) {
@@ -6606,6 +6611,7 @@ document.getElementById('save-provider-btn').addEventListener('click', () => {
     saveCustomProviders().then(() => modelUpdate()).then(() => {
       if (isActive) _selectedModel = model;
       renderProviders();
+      if (isActive) loadInferenceSettings();
       resetProviderForm();
       scrollToProviders();
       if (isActive) {
