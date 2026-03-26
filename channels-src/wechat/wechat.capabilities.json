@@ -17,7 +17,8 @@
   "capabilities": {
     "http": {
       "allowlist": [
-        { "host": "ilinkai.weixin.qq.com", "path_prefix": "/" }
+        { "host": "ilinkai.weixin.qq.com", "path_prefix": "/" },
+        { "host": "novac2c.cdn.weixin.qq.com", "path_prefix": "/c2c/" }
       ],
       "rate_limit": {
         "requests_per_minute": 60,
@@ -41,6 +42,7 @@
   },
   "config": {
     "base_url": "https://ilinkai.weixin.qq.com",
+    "cdn_base_url": "https://novac2c.cdn.weixin.qq.com/c2c",
     "bot_type": "3",
     "poll_interval_ms": 30000,
     "long_poll_timeout_ms": 35000

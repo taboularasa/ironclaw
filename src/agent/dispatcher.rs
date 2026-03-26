@@ -295,7 +295,6 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
         } else {
             tool_defs
         };
-
         // Update context for this iteration
         reason_ctx.available_tools = tool_defs;
         reason_ctx.system_prompt = Some(if force_text {

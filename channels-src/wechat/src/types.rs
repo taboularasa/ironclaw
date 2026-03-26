@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 pub struct WechatConfig {
     #[serde(default = "default_base_url")]
     pub base_url: String,
+    #[serde(default = "default_cdn_base_url")]
+    pub cdn_base_url: String,
     #[serde(default = "default_bot_type")]
     pub bot_type: String,
     #[serde(default = "default_poll_interval_ms")]
@@ -14,6 +16,10 @@ pub struct WechatConfig {
 
 fn default_base_url() -> String {
     "https://ilinkai.weixin.qq.com".to_string()
+}
+
+fn default_cdn_base_url() -> String {
+    "https://novac2c.cdn.weixin.qq.com/c2c".to_string()
 }
 
 fn default_bot_type() -> String {
@@ -32,6 +38,7 @@ impl Default for WechatConfig {
     fn default() -> Self {
         Self {
             base_url: default_base_url(),
+            cdn_base_url: default_cdn_base_url(),
             bot_type: default_bot_type(),
             poll_interval_ms: default_poll_interval_ms(),
             long_poll_timeout_ms: default_long_poll_timeout_ms(),
@@ -42,6 +49,19 @@ impl Default for WechatConfig {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct BaseInfo {
     pub channel_version: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct GetUploadUrlRequest {
+    pub filekey: String,
+    pub media_type: i32,
+    pub to_user_id: String,
+    pub rawsize: u64,
+    pub rawfilemd5: String,
+    pub filesize: u64,
+    pub no_need_thumb: bool,
+    pub aeskey: String,
+    pub base_info: BaseInfo,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -70,6 +90,14 @@ pub struct GetUpdatesResponse {
     pub msgs: Vec<WechatMessage>,
     #[serde(default)]
     pub get_updates_buf: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct GetUploadUrlResponse {
+    #[serde(default)]
+    pub upload_param: Option<String>,
+    #[serde(default)]
+    pub thumb_upload_param: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -140,11 +168,33 @@ pub struct MessageItem {
     pub r#type: Option<i32>,
     #[serde(default)]
     pub text_item: Option<TextItem>,
+    #[serde(default)]
+    pub image_item: Option<ImageItem>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct TextItem {
     pub text: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct CdnMedia {
+    #[serde(default)]
+    pub encrypt_query_param: Option<String>,
+    #[serde(default)]
+    pub aes_key: Option<String>,
+    #[serde(default)]
+    pub encrypt_type: Option<i32>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ImageItem {
+    #[serde(default)]
+    pub media: Option<CdnMedia>,
+    #[serde(default)]
+    pub aeskey: Option<String>,
+    #[serde(default)]
+    pub mid_size: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -164,5 +214,7 @@ pub const MESSAGE_TYPE_USER: i32 = 1;
 pub const MESSAGE_TYPE_BOT: i32 = 2;
 pub const MESSAGE_STATE_FINISH: i32 = 2;
 pub const MESSAGE_ITEM_TEXT: i32 = 1;
+pub const MESSAGE_ITEM_IMAGE: i32 = 2;
 pub const TYPING_STATUS_TYPING: i32 = 1;
 pub const TYPING_STATUS_CANCEL: i32 = 2;
+pub const UPLOAD_MEDIA_TYPE_IMAGE: i32 = 1;

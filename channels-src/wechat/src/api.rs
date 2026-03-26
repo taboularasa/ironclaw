@@ -3,11 +3,12 @@ use base64::Engine as _;
 use crate::near::agent::channel_host;
 use crate::types::{
     BaseInfo, GetConfigRequest, GetConfigResponse, GetUpdatesRequest, GetUpdatesResponse,
-    MessageItem, OutboundWechatMessage, SendMessageRequest, SendTypingRequest, SendTypingResponse,
-    TextItem, WechatConfig, MESSAGE_ITEM_TEXT, MESSAGE_STATE_FINISH, MESSAGE_TYPE_BOT,
+    GetUploadUrlRequest, GetUploadUrlResponse, MessageItem, OutboundWechatMessage,
+    SendMessageRequest, SendTypingRequest, SendTypingResponse, TextItem, WechatConfig,
+    MESSAGE_ITEM_TEXT, MESSAGE_STATE_FINISH, MESSAGE_TYPE_BOT,
 };
 
-fn base_info() -> BaseInfo {
+pub fn base_info() -> BaseInfo {
     BaseInfo {
         channel_version: env!("CARGO_PKG_VERSION").to_string(),
     }
@@ -37,6 +38,16 @@ fn request_headers(body: &[u8]) -> String {
     .to_string()
 }
 
+fn summarize_body_preview(bytes: &[u8], limit: usize) -> String {
+    let preview = String::from_utf8_lossy(&bytes[..bytes.len().min(limit)]);
+    let normalized = preview.replace(['\n', '\r'], " ");
+    if bytes.len() > limit {
+        format!("{normalized}...")
+    } else {
+        normalized
+    }
+}
+
 pub fn get_updates(
     config: &WechatConfig,
     get_updates_buf: &str,
@@ -51,6 +62,14 @@ pub fn get_updates(
         "{}ilink/bot/getupdates",
         ensure_trailing_slash(&config.base_url)
     );
+    channel_host::log(
+        channel_host::LogLevel::Info,
+        &format!(
+            "WeChat getUpdates request: cursor_len={} timeout_ms={}",
+            get_updates_buf.len(),
+            config.long_poll_timeout_ms
+        ),
+    );
     let response = channel_host::http_request(
         "POST",
         &url,
@@ -60,13 +79,42 @@ pub fn get_updates(
     )
     .map_err(|e| format!("getUpdates request failed: {e}"))?;
 
+    channel_host::log(
+        channel_host::LogLevel::Info,
+        &format!(
+            "WeChat getUpdates response: status={} bytes={} has_image_marker={} has_aeskey_marker={} preview={}",
+            response.status,
+            response.body.len(),
+            response
+                .body
+                .windows(b"image_item".len())
+                .any(|window| window == b"image_item"),
+            response
+                .body
+                .windows(b"aeskey".len())
+                .any(|window| window == b"aeskey"),
+            summarize_body_preview(&response.body, 160)
+        ),
+    );
+
     if response.status != 200 {
         let body = String::from_utf8_lossy(&response.body);
         return Err(format!("getUpdates returned {}: {}", response.status, body));
     }
 
-    serde_json::from_slice(&response.body)
-        .map_err(|e| format!("Failed to parse getUpdates response: {e}"))
+    let parsed: GetUpdatesResponse = serde_json::from_slice(&response.body)
+        .map_err(|e| format!("Failed to parse getUpdates response: {e}"))?;
+    channel_host::log(
+        channel_host::LogLevel::Info,
+        &format!(
+            "WeChat getUpdates parsed: ret={:?} errcode={:?} msg_count={} next_cursor_len={}",
+            parsed.ret,
+            parsed.errcode,
+            parsed.msgs.len(),
+            parsed.get_updates_buf.as_deref().unwrap_or_default().len()
+        ),
+    );
+    Ok(parsed)
 }
 
 pub fn send_text_message(
@@ -87,13 +135,21 @@ pub fn send_text_message(
                 text_item: Some(TextItem {
                     text: text.to_string(),
                 }),
+                image_item: None,
             }],
             context_token: context_token.map(str::to_string),
         },
         base_info: base_info(),
     };
 
-    let body = serde_json::to_vec(&message)
+    send_message_request(config, &message)
+}
+
+pub fn send_message_request(
+    config: &WechatConfig,
+    message: &SendMessageRequest,
+) -> Result<(), String> {
+    let body = serde_json::to_vec(message)
         .map_err(|e| format!("Failed to encode sendMessage request: {e}"))?;
     let headers = request_headers(&body);
     let url = format!(
@@ -113,6 +169,33 @@ pub fn send_text_message(
     }
 
     Ok(())
+}
+
+pub fn get_upload_url(
+    config: &WechatConfig,
+    request: &GetUploadUrlRequest,
+) -> Result<GetUploadUrlResponse, String> {
+    let body = serde_json::to_vec(request)
+        .map_err(|e| format!("Failed to encode getUploadUrl request: {e}"))?;
+    let headers = request_headers(&body);
+    let url = format!(
+        "{}ilink/bot/getuploadurl",
+        ensure_trailing_slash(&config.base_url)
+    );
+
+    let response = channel_host::http_request("POST", &url, &headers, Some(&body), Some(15_000))
+        .map_err(|e| format!("getUploadUrl request failed: {e}"))?;
+
+    if response.status != 200 {
+        let body = String::from_utf8_lossy(&response.body);
+        return Err(format!(
+            "getUploadUrl returned {}: {}",
+            response.status, body
+        ));
+    }
+
+    serde_json::from_slice(&response.body)
+        .map_err(|e| format!("Failed to parse getUploadUrl response: {e}"))
 }
 
 pub fn get_config(

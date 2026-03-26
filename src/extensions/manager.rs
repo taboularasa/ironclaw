@@ -4089,6 +4089,10 @@ impl ExtensionManager {
 
         let webhook_path = format!("/webhook/{}", name);
         let existing_channel = match router.get_channel_for_path(&webhook_path).await {
+            Some(ch) => Some(ch),
+            None => router.get_channel_by_name(name).await,
+        };
+        let existing_channel = match existing_channel {
             Some(ch) => ch,
             None => {
                 return Ok(ActivateResult {
