@@ -5,7 +5,7 @@
 //! - WebSocket upgrade with auth
 //! - Ping/pong
 //! - Client message → agent msg_tx
-//! - Broadcast SSE event → WebSocket client
+//! - Broadcast AppEvent → WebSocket client
 //! - Connection tracking (counter increment/decrement)
 //! - Gateway status endpoint
 
@@ -51,7 +51,8 @@ async fn start_test_server() -> (
         job_manager: None,
         prompt_queue: None,
         scheduler: None,
-        default_user_id: "test-user".to_string(),
+        owner_id: "test-user".to_string(),
+        default_sender_id: "test-user".to_string(),
         shutdown_tx: tokio::sync::RwLock::new(None),
         ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
         llm_provider: None,
@@ -163,7 +164,7 @@ async fn test_ws_broadcast_event_received() {
     // Give the connection a moment to fully establish
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    // Broadcast an SSE event (simulates agent sending a response)
+    // Broadcast an event (simulates agent sending a response)
     state.sse.broadcast(AppEvent::Response {
         content: "agent says hi".to_string(),
         thread_id: "t1".to_string(),

@@ -5,9 +5,35 @@
 //! frames, but other subsystems (agent loop, orchestrator, extensions)
 //! produce and consume them too.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize)]
+/// A single tool decision in a reasoning update (SSE DTO).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolDecisionDto {
+    pub tool_name: String,
+    pub rationale: String,
+}
+
+impl ToolDecisionDto {
+    /// Parse a list of tool decisions from a JSON array value.
+    pub fn from_json_array(value: &serde_json::Value) -> Vec<Self> {
+        value
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|d| {
+                        Some(Self {
+                            tool_name: d.get("tool_name")?.as_str()?.to_string(),
+                            rationale: d.get("rationale")?.as_str()?.to_string(),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum AppEvent {
     #[serde(rename = "response")]
@@ -163,4 +189,205 @@ pub enum AppEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         message: Option<String>,
     },
+
+    /// Agent reasoning update (why it chose specific tools).
+    #[serde(rename = "reasoning_update")]
+    ReasoningUpdate {
+        narrative: String,
+        decisions: Vec<ToolDecisionDto>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+    },
+
+    /// Reasoning update for a sandbox job.
+    #[serde(rename = "job_reasoning")]
+    JobReasoning {
+        job_id: String,
+        narrative: String,
+        decisions: Vec<ToolDecisionDto>,
+    },
+}
+
+impl AppEvent {
+    /// The wire-format event type string (matches the `#[serde(rename)]` value).
+    pub fn event_type(&self) -> &'static str {
+        match self {
+            Self::Response { .. } => "response",
+            Self::Thinking { .. } => "thinking",
+            Self::ToolStarted { .. } => "tool_started",
+            Self::ToolCompleted { .. } => "tool_completed",
+            Self::ToolResult { .. } => "tool_result",
+            Self::StreamChunk { .. } => "stream_chunk",
+            Self::Status { .. } => "status",
+            Self::JobStarted { .. } => "job_started",
+            Self::ApprovalNeeded { .. } => "approval_needed",
+            Self::AuthRequired { .. } => "auth_required",
+            Self::AuthCompleted { .. } => "auth_completed",
+            Self::Error { .. } => "error",
+            Self::Heartbeat => "heartbeat",
+            Self::JobMessage { .. } => "job_message",
+            Self::JobToolUse { .. } => "job_tool_use",
+            Self::JobToolResult { .. } => "job_tool_result",
+            Self::JobStatus { .. } => "job_status",
+            Self::JobResult { .. } => "job_result",
+            Self::ImageGenerated { .. } => "image_generated",
+            Self::Suggestions { .. } => "suggestions",
+            Self::TurnCost { .. } => "turn_cost",
+            Self::ExtensionStatus { .. } => "extension_status",
+            Self::ReasoningUpdate { .. } => "reasoning_update",
+            Self::JobReasoning { .. } => "job_reasoning",
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Verify that `event_type()` returns the same string as the serde
+    /// `"type"` field for every variant.  This catches drift between the
+    /// `#[serde(rename)]` attributes and the manual match arms.
+    #[test]
+    fn event_type_matches_serde_type_field() {
+        let variants: Vec<AppEvent> = vec![
+            AppEvent::Response {
+                content: String::new(),
+                thread_id: String::new(),
+            },
+            AppEvent::Thinking {
+                message: String::new(),
+                thread_id: None,
+            },
+            AppEvent::ToolStarted {
+                name: String::new(),
+                thread_id: None,
+            },
+            AppEvent::ToolCompleted {
+                name: String::new(),
+                success: true,
+                error: None,
+                parameters: None,
+                thread_id: None,
+            },
+            AppEvent::ToolResult {
+                name: String::new(),
+                preview: String::new(),
+                thread_id: None,
+            },
+            AppEvent::StreamChunk {
+                content: String::new(),
+                thread_id: None,
+            },
+            AppEvent::Status {
+                message: String::new(),
+                thread_id: None,
+            },
+            AppEvent::JobStarted {
+                job_id: String::new(),
+                title: String::new(),
+                browse_url: String::new(),
+            },
+            AppEvent::ApprovalNeeded {
+                request_id: String::new(),
+                tool_name: String::new(),
+                description: String::new(),
+                parameters: String::new(),
+                thread_id: None,
+                allow_always: false,
+            },
+            AppEvent::AuthRequired {
+                extension_name: String::new(),
+                instructions: None,
+                auth_url: None,
+                setup_url: None,
+            },
+            AppEvent::AuthCompleted {
+                extension_name: String::new(),
+                success: true,
+                message: String::new(),
+            },
+            AppEvent::Error {
+                message: String::new(),
+                thread_id: None,
+            },
+            AppEvent::Heartbeat,
+            AppEvent::JobMessage {
+                job_id: String::new(),
+                role: String::new(),
+                content: String::new(),
+            },
+            AppEvent::JobToolUse {
+                job_id: String::new(),
+                tool_name: String::new(),
+                input: serde_json::Value::Null,
+            },
+            AppEvent::JobToolResult {
+                job_id: String::new(),
+                tool_name: String::new(),
+                output: String::new(),
+            },
+            AppEvent::JobStatus {
+                job_id: String::new(),
+                message: String::new(),
+            },
+            AppEvent::JobResult {
+                job_id: String::new(),
+                status: String::new(),
+                session_id: None,
+                fallback_deliverable: None,
+            },
+            AppEvent::ImageGenerated {
+                data_url: String::new(),
+                path: None,
+                thread_id: None,
+            },
+            AppEvent::Suggestions {
+                suggestions: vec![],
+                thread_id: None,
+            },
+            AppEvent::TurnCost {
+                input_tokens: 0,
+                output_tokens: 0,
+                cost_usd: String::new(),
+                thread_id: None,
+            },
+            AppEvent::ExtensionStatus {
+                extension_name: String::new(),
+                status: String::new(),
+                message: None,
+            },
+            AppEvent::ReasoningUpdate {
+                narrative: String::new(),
+                decisions: vec![],
+                thread_id: None,
+            },
+            AppEvent::JobReasoning {
+                job_id: String::new(),
+                narrative: String::new(),
+                decisions: vec![],
+            },
+        ];
+
+        for variant in &variants {
+            let json: serde_json::Value = serde_json::to_value(variant).unwrap();
+            let serde_type = json["type"].as_str().unwrap();
+            assert_eq!(
+                variant.event_type(),
+                serde_type,
+                "event_type() mismatch for variant: {:?}",
+                variant
+            );
+        }
+    }
+
+    #[test]
+    fn round_trip_deserialize() {
+        let original = AppEvent::Response {
+            content: "hello".to_string(),
+            thread_id: "t1".to_string(),
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        let deserialized: AppEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.event_type(), "response");
+    }
 }

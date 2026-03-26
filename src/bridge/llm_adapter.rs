@@ -184,6 +184,7 @@ fn thread_msg_to_chat(msg: &ThreadMessage) -> ChatMessage {
                     id: c.id.clone(),
                     name: c.action_name.clone(),
                     arguments: c.parameters.clone(),
+                    reasoning: None,
                 })
                 .collect(),
         );

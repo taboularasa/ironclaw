@@ -97,7 +97,7 @@ pub async fn handle_ws_connection(
             let msg = tokio::select! {
                 event = event_stream.next() => {
                     match event {
-                        Some(sse_event) => WsServerMessage::from_app_event(&sse_event),
+                        Some(app_event) => WsServerMessage::from_app_event(&app_event),
                         None => break, // Broadcast channel closed
                     }
                 }
@@ -520,7 +520,8 @@ mod tests {
             job_manager: None,
             prompt_queue: None,
             scheduler: None,
-            default_user_id: "test".to_string(),
+            owner_id: "test".to_string(),
+            default_sender_id: "test".to_string(),
             shutdown_tx: tokio::sync::RwLock::new(None),
             ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
             llm_provider: None,

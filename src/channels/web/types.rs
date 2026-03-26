@@ -63,6 +63,9 @@ pub struct TurnInfo {
     pub started_at: String,
     pub completed_at: Option<String>,
     pub tool_calls: Vec<ToolCallInfo>,
+    /// Agent's reasoning narrative for this turn.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub narrative: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -74,6 +77,9 @@ pub struct ToolCallInfo {
     pub result_preview: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Agent's reasoning for choosing this tool.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rationale: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -116,7 +122,7 @@ pub struct ApprovalRequest {
 
 // --- App Event (re-exported from ironclaw_common) ---
 
-pub use ironclaw_common::AppEvent;
+pub use ironclaw_common::{AppEvent, ToolDecisionDto};
 
 // --- Memory ---
 
@@ -630,30 +636,7 @@ pub enum WsServerMessage {
 impl WsServerMessage {
     /// Create a WsServerMessage from an AppEvent.
     pub fn from_app_event(event: &AppEvent) -> Self {
-        let event_type = match event {
-            AppEvent::Response { .. } => "response",
-            AppEvent::Thinking { .. } => "thinking",
-            AppEvent::ToolStarted { .. } => "tool_started",
-            AppEvent::ToolCompleted { .. } => "tool_completed",
-            AppEvent::ToolResult { .. } => "tool_result",
-            AppEvent::StreamChunk { .. } => "stream_chunk",
-            AppEvent::Status { .. } => "status",
-            AppEvent::JobStarted { .. } => "job_started",
-            AppEvent::ApprovalNeeded { .. } => "approval_needed",
-            AppEvent::AuthRequired { .. } => "auth_required",
-            AppEvent::AuthCompleted { .. } => "auth_completed",
-            AppEvent::Error { .. } => "error",
-            AppEvent::Heartbeat => "heartbeat",
-            AppEvent::JobMessage { .. } => "job_message",
-            AppEvent::JobToolUse { .. } => "job_tool_use",
-            AppEvent::JobToolResult { .. } => "job_tool_result",
-            AppEvent::JobStatus { .. } => "job_status",
-            AppEvent::JobResult { .. } => "job_result",
-            AppEvent::ImageGenerated { .. } => "image_generated",
-            AppEvent::Suggestions { .. } => "suggestions",
-            AppEvent::TurnCost { .. } => "turn_cost",
-            AppEvent::ExtensionStatus { .. } => "extension_status",
-        };
+        let event_type = event.event_type();
         let data = serde_json::to_value(event).unwrap_or(serde_json::Value::Null);
         WsServerMessage::Event {
             event_type: event_type.to_string(),
@@ -945,12 +928,12 @@ mod tests {
     }
 
     #[test]
-    fn test_ws_server_from_sse_response() {
-        let sse = AppEvent::Response {
+    fn test_ws_server_from_app_event_response() {
+        let event = AppEvent::Response {
             content: "hello".to_string(),
             thread_id: "t1".to_string(),
         };
-        let ws = WsServerMessage::from_app_event(&sse);
+        let ws = WsServerMessage::from_app_event(&event);
         match ws {
             WsServerMessage::Event { event_type, data } => {
                 assert_eq!(event_type, "response");
@@ -962,12 +945,12 @@ mod tests {
     }
 
     #[test]
-    fn test_ws_server_from_sse_thinking() {
-        let sse = AppEvent::Thinking {
+    fn test_ws_server_from_app_event_thinking() {
+        let event = AppEvent::Thinking {
             message: "reasoning...".to_string(),
             thread_id: None,
         };
-        let ws = WsServerMessage::from_app_event(&sse);
+        let ws = WsServerMessage::from_app_event(&event);
         match ws {
             WsServerMessage::Event { event_type, data } => {
                 assert_eq!(event_type, "thinking");
@@ -978,8 +961,8 @@ mod tests {
     }
 
     #[test]
-    fn test_ws_server_from_sse_approval_needed() {
-        let sse = AppEvent::ApprovalNeeded {
+    fn test_ws_server_from_app_event_approval_needed() {
+        let event = AppEvent::ApprovalNeeded {
             request_id: "r1".to_string(),
             tool_name: "shell".to_string(),
             description: "Run ls".to_string(),
@@ -987,7 +970,7 @@ mod tests {
             thread_id: Some("t1".to_string()),
             allow_always: true,
         };
-        let ws = WsServerMessage::from_app_event(&sse);
+        let ws = WsServerMessage::from_app_event(&event);
         match ws {
             WsServerMessage::Event { event_type, data } => {
                 assert_eq!(event_type, "approval_needed");
@@ -999,9 +982,9 @@ mod tests {
     }
 
     #[test]
-    fn test_ws_server_from_sse_heartbeat() {
-        let sse = AppEvent::Heartbeat;
-        let ws = WsServerMessage::from_app_event(&sse);
+    fn test_ws_server_from_app_event_heartbeat() {
+        let event = AppEvent::Heartbeat;
+        let ws = WsServerMessage::from_app_event(&event);
         match ws {
             WsServerMessage::Event { event_type, .. } => {
                 assert_eq!(event_type, "heartbeat");
@@ -1041,7 +1024,7 @@ mod tests {
     }
 
     #[test]
-    fn test_sse_auth_required_serialize() {
+    fn test_app_event_auth_required_serialize() {
         let event = AppEvent::AuthRequired {
             extension_name: "notion".to_string(),
             instructions: Some("Get your token from...".to_string()),
@@ -1058,7 +1041,7 @@ mod tests {
     }
 
     #[test]
-    fn test_sse_auth_completed_serialize() {
+    fn test_app_event_auth_completed_serialize() {
         let event = AppEvent::AuthCompleted {
             extension_name: "notion".to_string(),
             success: true,
@@ -1072,14 +1055,14 @@ mod tests {
     }
 
     #[test]
-    fn test_ws_server_from_sse_auth_required() {
-        let sse = AppEvent::AuthRequired {
+    fn test_ws_server_from_app_event_auth_required() {
+        let event = AppEvent::AuthRequired {
             extension_name: "openai".to_string(),
             instructions: Some("Enter API key".to_string()),
             auth_url: None,
             setup_url: None,
         };
-        let ws = WsServerMessage::from_app_event(&sse);
+        let ws = WsServerMessage::from_app_event(&event);
         match ws {
             WsServerMessage::Event { event_type, data } => {
                 assert_eq!(event_type, "auth_required");
@@ -1090,13 +1073,13 @@ mod tests {
     }
 
     #[test]
-    fn test_ws_server_from_sse_auth_completed() {
-        let sse = AppEvent::AuthCompleted {
+    fn test_ws_server_from_app_event_auth_completed() {
+        let event = AppEvent::AuthCompleted {
             extension_name: "slack".to_string(),
             success: false,
             message: "Invalid token".to_string(),
         };
-        let ws = WsServerMessage::from_app_event(&sse);
+        let ws = WsServerMessage::from_app_event(&event);
         match ws {
             WsServerMessage::Event { event_type, data } => {
                 assert_eq!(event_type, "auth_completed");

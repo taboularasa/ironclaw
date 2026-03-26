@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, broadcast};
 use uuid::Uuid;
 
+use crate::channels::web::types::ToolDecisionDto;
 use crate::db::Database;
 use crate::llm::{CompletionRequest, LlmProvider, ToolCompletionRequest};
 use crate::orchestrator::auth::{TokenStore, worker_auth_middleware};
@@ -277,9 +278,9 @@ async fn job_event_handler(
         });
     }
 
-    // Convert to SSE event and broadcast
+    // Convert to app event and broadcast
     let job_id_str = job_id.to_string();
-    let sse_event = match payload.event_type.as_str() {
+    let app_event = match payload.event_type.as_str() {
         "message" => AppEvent::JobMessage {
             job_id: job_id_str,
             role: payload
@@ -344,6 +345,20 @@ async fn job_event_handler(
             // gain context/memory tracking capabilities.
             fallback_deliverable: payload.data.get("fallback_deliverable").cloned(),
         },
+        "reasoning" => {
+            let narrative = payload
+                .data
+                .get("narrative")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let decisions = ToolDecisionDto::from_json_array(&payload.data["decisions"]);
+            AppEvent::JobReasoning {
+                job_id: job_id_str,
+                narrative,
+                decisions,
+            }
+        }
         _ => AppEvent::JobStatus {
             job_id: job_id_str,
             message: payload
@@ -390,9 +405,9 @@ async fn job_event_handler(
         };
 
         if user_id.is_empty() {
-            let _ = tx.send((job_id, String::new(), sse_event));
+            let _ = tx.send((job_id, String::new(), app_event));
         } else {
-            let _ = tx.send((job_id, user_id, sse_event));
+            let _ = tx.send((job_id, user_id, app_event));
         }
     }
 

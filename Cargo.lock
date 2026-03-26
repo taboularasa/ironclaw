@@ -1205,6 +1205,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "bytemuck"
+version = "1.25.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c8efb64bd706a16a1bdde310ae86b351e4d21550d98d056f22f8a7f7a2183fec"
+dependencies = [
+ "bytemuck_derive",
+]
+
+[[package]]
+name = "bytemuck_derive"
+version = "1.10.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f9abbd1bc6865053c427f7198e6af43bfdedc55ab791faed4fbd361d789575ff"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+]
+
+[[package]]
 name = "byteorder"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4319,9 +4339,10 @@ dependencies = [
 [[package]]
 name = "monty"
 version = "0.0.8"
-source = "git+https://github.com/pydantic/monty.git?branch=main#982709bd52b10a1cf3f244a67951523a0b016a7f"
+source = "git+https://github.com/pydantic/monty.git?branch=main#4e1beaa7ebe04500f8873da3278538bfe0717070"
 dependencies = [
  "ahash 0.8.12",
+ "bytemuck",
  "fancy-regex",
  "hashbrown 0.16.1",
  "indexmap 2.13.0",

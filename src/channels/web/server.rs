@@ -345,8 +345,10 @@ pub struct GatewayState {
     pub job_manager: Option<Arc<ContainerJobManager>>,
     /// Prompt queue for Claude Code follow-up prompts.
     pub prompt_queue: Option<PromptQueue>,
-    /// Default user ID (fallback for non-request contexts like heartbeat/routines).
-    pub default_user_id: String,
+    /// Durable owner scope for persistence and unauthenticated callback flows.
+    pub owner_id: String,
+    /// Default sender/routing identity for gateway-originated messages.
+    pub default_sender_id: String,
     /// Shutdown signal sender.
     pub shutdown_tx: tokio::sync::RwLock<Option<oneshot::Sender<()>>>,
     /// WebSocket connection tracker.
@@ -775,7 +777,7 @@ async fn oauth_callback_handler(
                 error = %error,
                 "OAuth callback received with malformed state"
             );
-            clear_auth_mode(&state, &state.default_user_id).await;
+            clear_auth_mode(&state, &state.owner_id).await;
             return oauth_error_page("IronClaw");
         }
     };
@@ -949,7 +951,7 @@ async fn oauth_callback_handler(
         message
     };
 
-    // Broadcast SSE event to notify the web UI
+    // Broadcast event to notify the web UI
     if let Some(ref sse) = flow.sse_manager {
         sse.broadcast_for_user(
             &flow.user_id,
@@ -1136,7 +1138,7 @@ async fn slack_relay_oauth_callback_handler(
     let state_key = format!("relay:{}:oauth_state", DEFAULT_RELAY_NAME);
     let stored_state = match ext_mgr
         .secrets()
-        .get_decrypted(&state.default_user_id, &state_key)
+        .get_decrypted(&state.owner_id, &state_key)
         .await
     {
         Ok(secret) => secret.expose().to_string(),
@@ -1160,10 +1162,7 @@ async fn slack_relay_oauth_callback_handler(
     }
 
     // Delete the nonce (one-time use)
-    let _ = ext_mgr
-        .secrets()
-        .delete(&state.default_user_id, &state_key)
-        .await;
+    let _ = ext_mgr.secrets().delete(&state.owner_id, &state_key).await;
 
     let result: Result<(), String> = async {
         let store = state.store.as_ref().ok_or_else(|| {
@@ -1174,16 +1173,12 @@ async fn slack_relay_oauth_callback_handler(
         // Store team_id in settings
         let team_id_key = format!("relay:{}:team_id", DEFAULT_RELAY_NAME);
         let _ = store
-            .set_setting(
-                &state.default_user_id,
-                &team_id_key,
-                &serde_json::json!(team_id),
-            )
+            .set_setting(&state.owner_id, &team_id_key, &serde_json::json!(team_id))
             .await;
 
         // Activate the relay channel
         ext_mgr
-            .activate_stored_relay(DEFAULT_RELAY_NAME, &state.default_user_id)
+            .activate_stored_relay(DEFAULT_RELAY_NAME, &state.owner_id)
             .await
             .map_err(|e| format!("Failed to activate relay channel: {}", e))?;
 
@@ -1202,7 +1197,7 @@ async fn slack_relay_oauth_callback_handler(
         }
     };
 
-    // Broadcast SSE event to notify the web UI
+    // Broadcast event to notify the web UI
     state.sse.broadcast(AppEvent::AuthCompleted {
         extension_name: DEFAULT_RELAY_NAME.to_string(),
         success,
@@ -1303,6 +1298,9 @@ async fn chat_send_handler(
     }
 
     let mut msg = IncomingMessage::new("gateway", &user.user_id, &req.content);
+    if state.owner_id != state.default_sender_id && user.user_id == state.owner_id {
+        msg = msg.with_sender_id(&state.default_sender_id);
+    }
     // Prefer timezone from JSON body, fall back to X-Timezone header
     let tz = req
         .timezone
@@ -1404,6 +1402,9 @@ async fn chat_approval_handler(
     })?;
 
     let mut msg = IncomingMessage::new("gateway", &user.user_id, content);
+    if state.owner_id != state.default_sender_id && user.user_id == state.owner_id {
+        msg = msg.with_sender_id(&state.default_sender_id);
+    }
 
     if let Some(ref thread_id) = req.thread_id {
         msg = msg.with_thread(thread_id);
@@ -1724,8 +1725,10 @@ async fn chat_history_handler(
                             truncate_preview(&s, 500)
                         }),
                         error: tc.error.clone(),
+                        rationale: tc.rationale.clone(),
                     })
                     .collect(),
+                narrative: t.narrative.clone(),
             })
             .collect();
 
@@ -2572,7 +2575,7 @@ async fn routines_runs_handler(
             trigger_type: run.trigger_type.clone(),
             started_at: run.started_at.to_rfc3339(),
             completed_at: run.completed_at.map(|dt| dt.to_rfc3339()),
-            status: format!("{:?}", run.status),
+            status: run.status.to_string(),
             result_summary: run.result_summary.clone(),
             tokens_used: run.tokens_used,
             job_id: run.job_id,
@@ -2976,7 +2979,8 @@ mod tests {
             store: None,
             job_manager: None,
             prompt_queue: None,
-            default_user_id: "test".to_string(),
+            owner_id: "test".to_string(),
+            default_sender_id: "test".to_string(),
             shutdown_tx: tokio::sync::RwLock::new(None),
             ws_tracker: None,
             llm_provider: None,
