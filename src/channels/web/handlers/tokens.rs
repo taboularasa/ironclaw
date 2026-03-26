@@ -34,13 +34,12 @@ pub async fn tokens_create_handler(
         ))?
         .to_string();
 
-    let expires_in_days = body
+    let expires_in_days: Option<i64> = body
         .get("expires_in_days")
         .and_then(|v| v.as_u64())
-        .map(|d| d.min(36500));
+        .map(|d| d.min(36500) as i64);
 
-    let expires_at =
-        expires_in_days.map(|days| chrono::Utc::now() + chrono::Duration::days(days as i64));
+    let expires_at = expires_in_days.map(|days| chrono::Utc::now() + chrono::Duration::days(days));
 
     // Generate 32 random bytes for the token.
     // Hash the hex-encoded plaintext (what the user sends as Bearer token),

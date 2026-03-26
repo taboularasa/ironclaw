@@ -613,6 +613,7 @@ pub async fn start_server(
             axum::http::Method::GET,
             axum::http::Method::POST,
             axum::http::Method::PUT,
+            axum::http::Method::PATCH,
             axum::http::Method::DELETE,
         ])
         .allow_headers(AllowHeaders::list([
@@ -640,9 +641,7 @@ pub async fn start_server(
                 axum::http::Response::builder()
                     .status(axum::http::StatusCode::INTERNAL_SERVER_ERROR)
                     .header("content-type", "text/plain")
-                    .body(axum::body::Body::from(format!(
-                        "Internal Server Error: {detail}"
-                    )))
+                    .body(axum::body::Body::from("Internal Server Error"))
                     .unwrap_or_else(|_| {
                         axum::http::Response::new(axum::body::Body::from("Internal Server Error"))
                     })

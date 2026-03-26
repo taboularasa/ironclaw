@@ -156,7 +156,11 @@ impl DbAuthenticator {
     }
 
     /// Authenticate a token against the database, using cache when possible.
-    pub async fn authenticate(&self, candidate: &str) -> Option<UserIdentity> {
+    ///
+    /// Returns `Ok(Some(identity))` on success, `Ok(None)` if the token is
+    /// not found, or `Err(())` if the database is unreachable (so the caller
+    /// can return 503 instead of 401).
+    pub async fn authenticate(&self, candidate: &str) -> Result<Option<UserIdentity>, ()> {
         let hash = hash_token(candidate);
 
         // Check cache first (promotes to most-recent on hit)
@@ -164,7 +168,7 @@ impl DbAuthenticator {
             let mut cache = self.cache.write().await;
             if let Some((identity, inserted_at)) = cache.get(&hash) {
                 if inserted_at.elapsed().as_secs() < Self::CACHE_TTL_SECS {
-                    return Some(identity.clone());
+                    return Ok(Some(identity.clone()));
                 }
                 // Expired — remove stale entry
                 cache.pop(&hash);
@@ -174,10 +178,10 @@ impl DbAuthenticator {
         // Cache miss or expired — query DB
         let (token_record, user_record) = match self.store.authenticate_token(&hash).await {
             Ok(Some(pair)) => pair,
-            Ok(None) => return None,
+            Ok(None) => return Ok(None),
             Err(e) => {
-                tracing::warn!(error = %e, "DB auth lookup failed");
-                return None;
+                tracing::error!(error = %e, "DB auth lookup failed, returning 503");
+                return Err(());
             }
         };
 
@@ -202,7 +206,7 @@ impl DbAuthenticator {
             cache.put(hash, (identity.clone(), Instant::now()));
         }
 
-        Some(identity)
+        Ok(Some(identity))
     }
 }
 
@@ -331,11 +335,18 @@ pub async fn auth_middleware(
         }
 
         // 2. Fall back to DB-backed token lookup.
-        if let Some(ref db_auth) = auth.db_auth
-            && let Some(identity) = db_auth.authenticate(tok).await
-        {
-            request.extensions_mut().insert(identity);
-            return next.run(request).await;
+        if let Some(ref db_auth) = auth.db_auth {
+            match db_auth.authenticate(tok).await {
+                Ok(Some(identity)) => {
+                    request.extensions_mut().insert(identity);
+                    return next.run(request).await;
+                }
+                Err(()) => {
+                    return (StatusCode::SERVICE_UNAVAILABLE, "Database unavailable")
+                        .into_response();
+                }
+                Ok(None) => {}
+            }
         }
     }
 
