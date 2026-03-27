@@ -1068,6 +1068,10 @@ Send messages via Signal, Telegram, Slack, or other connected channels:\n\
 - `channel` (optional): which channel to use (signal, telegram, slack, etc.)\n\
 - `target` (optional): who to send to (phone number, group ID, etc.)\n\
 \nOmit both `channel` and `target` for a proactive follow-up in the current conversation.\n\
+Target formats:\n\
+- Signal: E.164 phone number (`+1234567890`) or group ID\n\
+- Telegram: username or chat ID\n\
+- Slack: channel name (`#general`) or user ID\n\
 Examples (tool calls use JSON format):\n\
 - Proactive follow-up here: {\"content\": \"Hi again!\"}\n\
 - Send file here proactively: {\"content\": \"Here's the file\", \"attachments\": [\"/path/to/file.txt\"]}\n\
@@ -2477,6 +2481,10 @@ That's my plan."#;
         let section = reasoning.build_channel_section();
         assert!(section.contains("respond normally without calling `message`"));
         assert!(section.contains("proactive follow-up in the current conversation"));
+        assert!(section.contains("Target formats:"));
+        assert!(section.contains("Signal: E.164 phone number"));
+        assert!(section.contains("Telegram: username or chat ID"));
+        assert!(section.contains("Slack: channel name"));
         assert!(section.contains("Proactive follow-up here"));
     }
 
