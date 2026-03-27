@@ -102,9 +102,9 @@ Browser-facing HTTP API and SSE/WebSocket real-time streaming. Axum-based, singl
 | POST | `/api/admin/users/{id}/suspend` | Suspend a user |
 | POST | `/api/admin/users/{id}/activate` | Re-activate a user |
 | GET | `/api/admin/usage` | Per-user LLM usage stats |
-| GET | `/api/admin/users/{id}/secrets` | List a user's secrets (names only) |
-| PUT | `/api/admin/users/{id}/secrets/{name}` | Create or update a user's secret |
-| DELETE | `/api/admin/users/{id}/secrets/{name}` | Delete a user's secret |
+| GET | `/api/admin/users/{user_id}/secrets` | List a user's secrets (names only) |
+| PUT | `/api/admin/users/{user_id}/secrets/{name}` | Create or update a user's secret |
+| DELETE | `/api/admin/users/{user_id}/secrets/{name}` | Delete a user's secret |
 
 ### Profile (self-service)
 | Method | Path | Description |

@@ -2420,7 +2420,7 @@ impl Store {
             &[
                 &id,
                 &user_id,
-                &token_hash.to_vec(),
+                &token_hash.as_slice(),
                 &token_prefix,
                 &name,
                 &expires_at,
@@ -2482,7 +2482,7 @@ impl Store {
             &[
                 &id,
                 &user.id,
-                &token_hash.to_vec(),
+                &token_hash.as_slice(),
                 &token_prefix,
                 &token_name,
                 &expires_at,

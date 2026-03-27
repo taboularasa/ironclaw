@@ -181,7 +181,7 @@ impl DbAuthenticator {
             Ok(None) => return Ok(None),
             Err(e) => {
                 tracing::warn!("DB auth lookup failed: {e}");
-                return Ok(None);
+                return Err(());
             }
         };
 

@@ -267,16 +267,16 @@ impl Scheduler {
                 });
             }
 
-            // Per-user concurrency check
+            // Per-user concurrency check — only count jobs consuming a parallel
+            // execution slot (Pending/InProgress/Stuck), not Completed/Submitted.
             if let Some(max_per_user) = self.config.max_jobs_per_user
                 && let Ok(ctx) = self.context_manager.get_context(job_id).await
             {
-                let user_active = self
+                let user_blocking = self
                     .context_manager
-                    .active_jobs_for(&ctx.user_id)
-                    .await
-                    .len();
-                if user_active >= max_per_user {
+                    .parallel_blocking_count_for(&ctx.user_id)
+                    .await;
+                if user_blocking >= max_per_user {
                     return Err(JobError::MaxJobsExceeded { max: max_per_user });
                 }
             }
