@@ -438,6 +438,24 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
             call_cost,
         );
 
+        // Persist LLM call to DB so usage stats survive restarts.
+        // Chat turns don't create agent_jobs, so job_id is None.
+        if let Some(store) = self.tenant.store() {
+            let record = crate::history::LlmCallRecord {
+                job_id: None,
+                conversation_id: Some(self.thread_id),
+                provider: self.agent.llm().model_name(),
+                model: &model_name,
+                input_tokens: output.usage.input_tokens,
+                output_tokens: output.usage.output_tokens,
+                cost: call_cost,
+                purpose: Some("chat"),
+            };
+            if let Err(e) = store.record_llm_call(&record).await {
+                tracing::warn!("Failed to persist LLM call to DB: {}", e);
+            }
+        }
+
         Ok(output)
     }
 

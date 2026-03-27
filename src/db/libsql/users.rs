@@ -629,20 +629,22 @@ impl UserStore for LibSqlBackend {
         user_id: Option<&str>,
     ) -> Result<Vec<crate::db::UserSummaryStats>, DatabaseError> {
         let conn = self.connect().await?;
+        // Aggregate from llm_calls, resolving user_id via either agent_jobs
+        // (for background job calls) or conversations (for chat calls where
+        // job_id is NULL). Also count distinct agent_jobs per user.
         let mut rows = if let Some(uid) = user_id {
             conn.query(
                 r#"
                 SELECT
-                    j.user_id,
+                    COALESCE(j.user_id, c.user_id) AS user_id,
                     COUNT(DISTINCT j.id) AS job_count,
                     CAST(COALESCE(SUM(l.cost), 0) AS TEXT) AS total_cost,
-                    CASE WHEN MAX(l.created_at) > MAX(j.created_at)
-                         THEN MAX(l.created_at)
-                         ELSE MAX(j.created_at) END AS last_active_at
-                FROM agent_jobs j
-                LEFT JOIN llm_calls l ON l.job_id = j.id
-                WHERE j.user_id = ?1
-                GROUP BY j.user_id
+                    MAX(l.created_at) AS last_active_at
+                FROM llm_calls l
+                LEFT JOIN agent_jobs j ON l.job_id = j.id
+                LEFT JOIN conversations c ON l.conversation_id = c.id
+                WHERE COALESCE(j.user_id, c.user_id) = ?1
+                GROUP BY COALESCE(j.user_id, c.user_id)
                 "#,
                 params![uid],
             )
@@ -652,15 +654,14 @@ impl UserStore for LibSqlBackend {
             conn.query(
                 r#"
                 SELECT
-                    j.user_id,
+                    COALESCE(j.user_id, c.user_id) AS user_id,
                     COUNT(DISTINCT j.id) AS job_count,
                     CAST(COALESCE(SUM(l.cost), 0) AS TEXT) AS total_cost,
-                    CASE WHEN MAX(l.created_at) > MAX(j.created_at)
-                         THEN MAX(l.created_at)
-                         ELSE MAX(j.created_at) END AS last_active_at
-                FROM agent_jobs j
-                LEFT JOIN llm_calls l ON l.job_id = j.id
-                GROUP BY j.user_id
+                    MAX(l.created_at) AS last_active_at
+                FROM llm_calls l
+                LEFT JOIN agent_jobs j ON l.job_id = j.id
+                LEFT JOIN conversations c ON l.conversation_id = c.id
+                GROUP BY COALESCE(j.user_id, c.user_id)
                 "#,
                 (),
             )
@@ -963,9 +964,9 @@ mod tests {
         // Bob: 1 job, no LLM calls
         insert_test_job(&db, "job-b1", "bob").await;
 
-        // All users
+        // All users with LLM calls (Bob has a job but no LLM calls, so no stats)
         let stats = db.user_summary_stats(None).await.unwrap();
-        assert_eq!(stats.len(), 2);
+        assert_eq!(stats.len(), 1);
 
         let alice_stats = stats.iter().find(|s| s.user_id == "alice").unwrap();
         assert_eq!(alice_stats.job_count, 2);
@@ -975,14 +976,17 @@ mod tests {
         );
         assert!(alice_stats.last_active_at.is_some());
 
-        let bob_stats = stats.iter().find(|s| s.user_id == "bob").unwrap();
-        assert_eq!(bob_stats.job_count, 1);
-        assert_eq!(bob_stats.total_cost, rust_decimal::Decimal::ZERO);
+        // Bob has no LLM calls so doesn't appear in summary stats
+        assert!(stats.iter().find(|s| s.user_id == "bob").is_none());
 
         // Filter to single user
         let alice_only = db.user_summary_stats(Some("alice")).await.unwrap();
         assert_eq!(alice_only.len(), 1);
         assert_eq!(alice_only[0].job_count, 2);
+
+        // Bob returns empty when filtered
+        let bob_only = db.user_summary_stats(Some("bob")).await.unwrap();
+        assert!(bob_only.is_empty());
     }
 
     #[tokio::test]

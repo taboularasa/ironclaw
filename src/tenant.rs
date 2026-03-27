@@ -209,6 +209,13 @@ impl TenantScope {
             .await
     }
 
+    // === LLM call recording ===
+
+    /// Record an LLM call to the database for persistent usage tracking.
+    pub async fn record_llm_call(&self, record: &LlmCallRecord<'_>) -> Result<Uuid, DatabaseError> {
+        self.inner.record_llm_call(record).await
+    }
+
     // === Settings ===
 
     pub async fn get_setting(&self, key: &str) -> Result<Option<serde_json::Value>, DatabaseError> {
