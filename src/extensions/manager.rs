@@ -53,6 +53,38 @@ struct HostedOAuthFlowStart {
     flow: crate::cli::oauth_defaults::PendingOAuthFlow,
 }
 
+#[derive(Debug, Default)]
+struct SecretCleanupPlan {
+    base_secrets: HashSet<String>,
+    companion_secrets: HashMap<String, HashSet<String>>,
+}
+
+impl SecretCleanupPlan {
+    fn add_base_secret(&mut self, secret_name: impl AsRef<str>) {
+        self.base_secrets
+            .insert(secret_name.as_ref().to_lowercase());
+    }
+
+    fn add_companion_secret(
+        &mut self,
+        base_secret_name: impl AsRef<str>,
+        companion_secret_name: impl AsRef<str>,
+    ) {
+        self.companion_secrets
+            .entry(base_secret_name.as_ref().to_lowercase())
+            .or_default()
+            .insert(companion_secret_name.as_ref().to_lowercase());
+    }
+}
+
+fn oauth_refresh_secret_name(secret_name: &str) -> String {
+    format!("{}_refresh_token", secret_name.to_lowercase())
+}
+
+fn oauth_scopes_secret_name(secret_name: &str) -> String {
+    format!("{}_scopes", secret_name.to_lowercase())
+}
+
 fn normalize_oauth_callback_path(path: &str) -> String {
     let trimmed_path = path.trim_end_matches('/');
     if trimmed_path.is_empty() {
@@ -1501,6 +1533,10 @@ impl ExtensionManager {
 
         match kind {
             ExtensionKind::McpServer => {
+                let cleanup_plan = self
+                    .collect_secret_cleanup_plan(name, kind, user_id)
+                    .await?;
+
                 // Unregister tools with this server's prefix
                 let tool_names: Vec<String> = self
                     .tool_registry
@@ -1522,6 +1558,9 @@ impl ExtensionManager {
                     .await
                     .map_err(|e| ExtensionError::Config(e.to_string()))?;
 
+                self.cleanup_uninstalled_extension_secrets(cleanup_plan, user_id)
+                    .await;
+
                 Ok(format!(
                     "Removed MCP server '{}' and {} tool(s)",
                     name,
@@ -1529,6 +1568,10 @@ impl ExtensionManager {
                 ))
             }
             ExtensionKind::WasmTool => {
+                let cleanup_plan = self
+                    .collect_secret_cleanup_plan(name, kind, user_id)
+                    .await?;
+
                 // Unregister from tool registry
                 self.tool_registry.unregister(name).await;
 
@@ -1573,9 +1616,16 @@ impl ExtensionManager {
                     let _ = tokio::fs::remove_file(&cap_path).await;
                 }
 
+                self.cleanup_uninstalled_extension_secrets(cleanup_plan, user_id)
+                    .await;
+
                 Ok(format!("Removed WASM tool '{}'", name))
             }
             ExtensionKind::WasmChannel => {
+                let cleanup_plan = self
+                    .collect_secret_cleanup_plan(name, kind, user_id)
+                    .await?;
+
                 // Remove from active set and persist
                 self.active_channel_names.write().await.remove(name);
                 self.persist_active_channels(user_id).await;
@@ -1600,6 +1650,9 @@ impl ExtensionManager {
                 if cap_path.exists() {
                     let _ = tokio::fs::remove_file(&cap_path).await;
                 }
+
+                self.cleanup_uninstalled_extension_secrets(cleanup_plan, user_id)
+                    .await;
 
                 Ok(format!(
                     "Removed channel '{}'. Restart IronClaw for the change to take effect.",
@@ -2896,6 +2949,203 @@ impl ExtensionManager {
             .join(format!("{}.capabilities.json", name));
         let cap_bytes = tokio::fs::read(&cap_path).await.ok()?;
         crate::tools::wasm::CapabilitiesFile::from_bytes(&cap_bytes).ok()
+    }
+
+    async fn load_channel_capabilities(
+        &self,
+        name: &str,
+    ) -> Option<crate::channels::wasm::ChannelCapabilitiesFile> {
+        let cap_path = self
+            .wasm_channels_dir
+            .join(format!("{}.capabilities.json", name));
+        let cap_bytes = tokio::fs::read(&cap_path).await.ok()?;
+        crate::channels::wasm::ChannelCapabilitiesFile::from_bytes(&cap_bytes).ok()
+    }
+
+    async fn collect_secret_cleanup_plan(
+        &self,
+        name: &str,
+        kind: ExtensionKind,
+        user_id: &str,
+    ) -> Result<SecretCleanupPlan, ExtensionError> {
+        let mut plan = SecretCleanupPlan::default();
+
+        match kind {
+            ExtensionKind::WasmTool => {
+                if let Some(cap) = self.load_tool_capabilities(name).await {
+                    if let Some(auth) = cap.auth {
+                        plan.add_base_secret(&auth.secret_name);
+                        plan.add_companion_secret(
+                            &auth.secret_name,
+                            oauth_refresh_secret_name(&auth.secret_name),
+                        );
+                        plan.add_companion_secret(
+                            &auth.secret_name,
+                            oauth_scopes_secret_name(&auth.secret_name),
+                        );
+                    }
+
+                    if let Some(setup) = cap.setup {
+                        for secret in setup.required_secrets {
+                            plan.add_base_secret(secret.name);
+                        }
+                    }
+                }
+            }
+            ExtensionKind::WasmChannel => {
+                if let Some(cap) = self.load_channel_capabilities(name).await {
+                    for secret in cap.setup.required_secrets {
+                        plan.add_base_secret(secret.name);
+                    }
+                }
+            }
+            ExtensionKind::McpServer => {
+                let server = self
+                    .get_mcp_server(name, user_id)
+                    .await
+                    .map_err(|e| ExtensionError::Config(e.to_string()))?;
+                let token_secret_name = server.token_secret_name();
+                plan.add_base_secret(&token_secret_name);
+                plan.add_base_secret(server.client_id_secret_name());
+                // MCP OAuth can persist companion secrets through two paths:
+                // the MCP auth helper uses `mcp_<name>_refresh_token`, while the
+                // hosted gateway callback stores companions alongside the access
+                // token secret (`<token_secret>_refresh_token` / `_scopes`).
+                plan.add_companion_secret(&token_secret_name, server.refresh_token_secret_name());
+                plan.add_companion_secret(
+                    &token_secret_name,
+                    oauth_refresh_secret_name(&token_secret_name),
+                );
+                plan.add_companion_secret(
+                    &token_secret_name,
+                    oauth_scopes_secret_name(&token_secret_name),
+                );
+            }
+            ExtensionKind::ChannelRelay => {}
+        }
+
+        Ok(plan)
+    }
+
+    async fn cleanup_uninstalled_extension_secrets(&self, plan: SecretCleanupPlan, user_id: &str) {
+        for base_secret in &plan.base_secrets {
+            if self.secret_still_referenced(base_secret, user_id).await {
+                continue;
+            }
+
+            self.delete_secret_best_effort(user_id, base_secret).await;
+
+            if let Some(companion_secrets) = plan.companion_secrets.get(base_secret) {
+                for companion_secret in companion_secrets {
+                    if !self
+                        .secret_still_referenced(companion_secret, user_id)
+                        .await
+                    {
+                        self.delete_secret_best_effort(user_id, companion_secret)
+                            .await;
+                    }
+                }
+            }
+        }
+    }
+
+    async fn delete_secret_best_effort(&self, user_id: &str, secret_name: &str) {
+        if let Err(error) = self.secrets.delete(user_id, secret_name).await {
+            tracing::warn!(
+                user_id,
+                secret_name,
+                error = %error,
+                "Failed to delete secret while uninstalling extension"
+            );
+        }
+    }
+
+    async fn secret_still_referenced(&self, secret_name: &str, user_id: &str) -> bool {
+        match self.try_secret_still_referenced(secret_name, user_id).await {
+            Ok(referenced) => referenced,
+            Err(error) => {
+                tracing::warn!(
+                    secret_name,
+                    user_id,
+                    error,
+                    "Failed to determine whether secret is still referenced; keeping secret"
+                );
+                true
+            }
+        }
+    }
+
+    async fn try_secret_still_referenced(
+        &self,
+        secret_name: &str,
+        user_id: &str,
+    ) -> Result<bool, String> {
+        let normalized_secret_name = secret_name.to_lowercase();
+
+        let tools = discover_tools(&self.wasm_tools_dir)
+            .await
+            .map_err(|e| format!("discover tools: {e}"))?;
+        for tool_name in tools.keys() {
+            if let Some(cap) = self.load_tool_capabilities(tool_name).await
+                && Self::tool_references_secret(&cap, &normalized_secret_name)
+            {
+                return Ok(true);
+            }
+        }
+
+        let channels = crate::channels::wasm::discover_channels(&self.wasm_channels_dir)
+            .await
+            .map_err(|e| format!("discover channels: {e}"))?;
+        for channel_name in channels.keys() {
+            if let Some(cap) = self.load_channel_capabilities(channel_name).await
+                && Self::channel_references_secret(&cap, &normalized_secret_name)
+            {
+                return Ok(true);
+            }
+        }
+
+        let mcp_servers = self
+            .load_mcp_servers(user_id)
+            .await
+            .map_err(|e| format!("load MCP servers: {e}"))?;
+        if mcp_servers
+            .servers
+            .iter()
+            .any(|server| Self::mcp_server_references_secret(server, &normalized_secret_name))
+        {
+            return Ok(true);
+        }
+
+        Ok(false)
+    }
+
+    fn tool_references_secret(
+        cap: &crate::tools::wasm::CapabilitiesFile,
+        secret_name: &str,
+    ) -> bool {
+        cap.auth
+            .as_ref()
+            .is_some_and(|auth| auth.secret_name.eq_ignore_ascii_case(secret_name))
+            || cap.setup.as_ref().is_some_and(|setup| {
+                setup
+                    .required_secrets
+                    .iter()
+                    .any(|secret| secret.name.eq_ignore_ascii_case(secret_name))
+            })
+    }
+
+    fn channel_references_secret(
+        cap: &crate::channels::wasm::ChannelCapabilitiesFile,
+        secret_name: &str,
+    ) -> bool {
+        cap.setup
+            .required_secrets
+            .iter()
+            .any(|secret| secret.name.eq_ignore_ascii_case(secret_name))
+    }
+
+    fn mcp_server_references_secret(server: &McpServerConfig, secret_name: &str) -> bool {
+        server.token_secret_name() == secret_name || server.client_id_secret_name() == secret_name
     }
 
     /// Collect merged OAuth scopes from all installed tools sharing the same secret_name.
@@ -5706,6 +5956,8 @@ mod tests {
         ExtensionError, ExtensionKind, ExtensionSource, InstallResult, VerificationChallenge,
     };
     use crate::pairing::PairingStore;
+    use crate::secrets::CreateSecretParams;
+    use crate::tools::mcp::McpServerConfig;
 
     fn require(condition: bool, message: impl Into<String>) -> Result<(), String> {
         if condition {
@@ -6024,6 +6276,38 @@ mod tests {
         )
         .expect("capabilities");
         tools_dir
+    }
+
+    fn write_test_channel(
+        dir: &std::path::Path,
+        name: &str,
+        capabilities_json: &str,
+    ) -> std::path::PathBuf {
+        let channels_dir = dir.join("channels");
+        std::fs::create_dir_all(&channels_dir).expect("channels dir");
+        std::fs::write(
+            channels_dir.join(format!("{name}.wasm")),
+            b"not-a-real-wasm",
+        )
+        .expect("wasm");
+        std::fs::write(
+            channels_dir.join(format!("{name}.capabilities.json")),
+            capabilities_json,
+        )
+        .expect("capabilities");
+        channels_dir
+    }
+
+    async fn store_test_secret(
+        manager: &crate::extensions::manager::ExtensionManager,
+        name: &str,
+        value: &str,
+    ) {
+        manager
+            .secrets
+            .create("test", CreateSecretParams::new(name, value))
+            .await
+            .expect("store secret");
     }
 
     #[test]
@@ -7063,7 +7347,13 @@ mod tests {
         // Regression: remove() only checked channel_runtime for shutdown, missing
         // relay-only mode where only relay_channel_manager is set.
         let dir = tempfile::tempdir().expect("temp dir");
-        let mgr = make_test_manager(None, dir.path().to_path_buf());
+        let (store, _db_dir) = make_test_store().await;
+        let mgr = make_test_manager_with_dirs(
+            None,
+            dir.path().join("tools"),
+            dir.path().join("channels"),
+            Some(store),
+        );
 
         // Set up relay channel manager with a stub channel
         let cm = Arc::new(crate::channels::ChannelManager::new());
@@ -7090,6 +7380,8 @@ mod tests {
                 .await
                 .expect("store team_id");
         }
+        store_test_secret(&mgr, "relay:slack-relay:oauth_state", "nonce").await;
+        store_test_secret(&mgr, "relay:slack-relay:stream_token", "legacy-token").await;
 
         // Verify channel exists before removal
         assert!(cm.get_channel("slack-relay").await.is_some());
@@ -7117,6 +7409,30 @@ mod tests {
         assert!(
             cm.get_channel("slack-relay").await.is_none(),
             "relay channel should be removed from the channel manager"
+        );
+        assert!(
+            !mgr.secrets
+                .exists("test", "relay:slack-relay:oauth_state")
+                .await
+                .expect("oauth state exists query"),
+            "relay oauth_state secret should be removed"
+        );
+        assert!(
+            !mgr.secrets
+                .exists("test", "relay:slack-relay:stream_token")
+                .await
+                .expect("stream token exists query"),
+            "relay legacy stream token should be removed"
+        );
+        assert_eq!(
+            mgr.store
+                .as_ref()
+                .expect("store")
+                .get_setting("test", "relay:slack-relay:team_id")
+                .await
+                .expect("team_id query"),
+            None,
+            "relay team_id setting should be removed"
         );
     }
 
@@ -7226,6 +7542,133 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_remove_wasm_tool_deletes_unique_secrets() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let tools_dir = write_test_tool(
+            dir.path(),
+            "github",
+            r#"{
+                "name": "github",
+                "auth": { "secret_name": "github_token" },
+                "setup": {
+                    "required_secrets": [
+                        { "name": "github_client_secret", "prompt": "GitHub client secret for testing cleanup behavior." }
+                    ]
+                }
+            }"#,
+        );
+        let mgr = make_test_manager_with_dirs(None, tools_dir, dir.path().join("channels"), None);
+
+        store_test_secret(&mgr, "github_token", "access-token").await;
+        store_test_secret(&mgr, "github_token_refresh_token", "refresh-token").await;
+        store_test_secret(&mgr, "github_token_scopes", "repo workflow").await;
+        store_test_secret(&mgr, "github_client_secret", "client-secret").await;
+
+        mgr.remove("github", "test")
+            .await
+            .expect("remove should succeed");
+
+        for secret_name in [
+            "github_token",
+            "github_token_refresh_token",
+            "github_token_scopes",
+            "github_client_secret",
+        ] {
+            assert!(
+                !mgr.secrets
+                    .exists("test", secret_name)
+                    .await
+                    .expect("exists query"),
+                "secret {secret_name} should be deleted"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_remove_wasm_tool_keeps_shared_secrets_until_last_extension() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        write_test_tool(
+            dir.path(),
+            "google-calendar",
+            r#"{
+                "name": "google-calendar",
+                "auth": { "secret_name": "google_oauth_token" },
+                "setup": {
+                    "required_secrets": [
+                        { "name": "google_oauth_client_id", "prompt": "Google OAuth client id for cleanup testing." },
+                        { "name": "google_oauth_client_secret", "prompt": "Google OAuth client secret for cleanup testing." }
+                    ]
+                }
+            }"#,
+        );
+        let tools_dir = write_test_tool(
+            dir.path(),
+            "google-drive",
+            r#"{
+                "name": "google-drive",
+                "auth": { "secret_name": "google_oauth_token" },
+                "setup": {
+                    "required_secrets": [
+                        { "name": "google_oauth_client_id", "prompt": "Google OAuth client id for cleanup testing." },
+                        { "name": "google_oauth_client_secret", "prompt": "Google OAuth client secret for cleanup testing." }
+                    ]
+                }
+            }"#,
+        );
+        let mgr = make_test_manager_with_dirs(None, tools_dir, dir.path().join("channels"), None);
+
+        for (secret_name, value) in [
+            ("google_oauth_token", "access-token"),
+            ("google_oauth_token_refresh_token", "refresh-token"),
+            ("google_oauth_token_scopes", "calendar drive"),
+            ("google_oauth_client_id", "client-id"),
+            ("google_oauth_client_secret", "client-secret"),
+        ] {
+            store_test_secret(&mgr, secret_name, value).await;
+        }
+
+        mgr.remove("google-calendar", "test")
+            .await
+            .expect("first remove should succeed");
+
+        for secret_name in [
+            "google_oauth_token",
+            "google_oauth_token_refresh_token",
+            "google_oauth_token_scopes",
+            "google_oauth_client_id",
+            "google_oauth_client_secret",
+        ] {
+            assert!(
+                mgr.secrets
+                    .exists("test", secret_name)
+                    .await
+                    .expect("exists query"),
+                "shared secret {secret_name} should remain while google-drive is still installed"
+            );
+        }
+
+        mgr.remove("google-drive", "test")
+            .await
+            .expect("second remove should succeed");
+
+        for secret_name in [
+            "google_oauth_token",
+            "google_oauth_token_refresh_token",
+            "google_oauth_token_scopes",
+            "google_oauth_client_id",
+            "google_oauth_client_secret",
+        ] {
+            assert!(
+                !mgr.secrets
+                    .exists("test", secret_name)
+                    .await
+                    .expect("exists query"),
+                "shared secret {secret_name} should be deleted after the last tool is removed"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn test_remove_wasm_channel_clears_activation_error_and_deletes_files() {
         let dir = tempfile::tempdir().expect("temp dir");
         let tools_dir = dir.path().join("tools");
@@ -7257,6 +7700,80 @@ mod tests {
             !cap_path.exists(),
             "channel capabilities file should be deleted on remove"
         );
+    }
+
+    #[tokio::test]
+    async fn test_remove_wasm_channel_deletes_setup_secrets() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let channels_dir = write_test_channel(
+            dir.path(),
+            "telegram",
+            r#"{
+                "type": "channel",
+                "name": "telegram",
+                "setup": {
+                    "required_secrets": [
+                        {
+                            "name": "telegram_bot_token",
+                            "prompt": "Telegram bot token used to verify uninstall cleanup behavior."
+                        }
+                    ]
+                }
+            }"#,
+        );
+        let mgr = make_test_manager_with_dirs(None, dir.path().join("tools"), channels_dir, None);
+
+        store_test_secret(&mgr, "telegram_bot_token", "123:telegram-token").await;
+
+        mgr.remove("telegram", "test")
+            .await
+            .expect("remove should succeed");
+
+        assert!(
+            !mgr.secrets
+                .exists("test", "telegram_bot_token")
+                .await
+                .expect("exists query"),
+            "channel setup secret should be deleted"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_remove_mcp_server_deletes_stored_secrets() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (store, _db_dir) = make_test_store().await;
+        let mgr = make_test_manager_with_dirs(
+            None,
+            dir.path().join("tools"),
+            dir.path().join("channels"),
+            Some(Arc::clone(&store)),
+        );
+        let server = McpServerConfig::new("notion", "https://example.com/mcp");
+        mgr.add_mcp_server(server.clone(), "test")
+            .await
+            .expect("add mcp server");
+
+        store_test_secret(&mgr, &server.token_secret_name(), "access-token").await;
+        store_test_secret(&mgr, &server.refresh_token_secret_name(), "refresh-token").await;
+        store_test_secret(&mgr, &server.client_id_secret_name(), "client-id").await;
+
+        mgr.remove("notion", "test")
+            .await
+            .expect("remove should succeed");
+
+        for secret_name in [
+            server.token_secret_name(),
+            server.refresh_token_secret_name(),
+            server.client_id_secret_name(),
+        ] {
+            assert!(
+                !mgr.secrets
+                    .exists("test", &secret_name)
+                    .await
+                    .expect("exists query"),
+                "MCP secret {secret_name} should be deleted"
+            );
+        }
     }
 
     #[test]
