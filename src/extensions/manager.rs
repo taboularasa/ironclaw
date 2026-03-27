@@ -2973,6 +2973,10 @@ impl ExtensionManager {
         match kind {
             ExtensionKind::WasmTool => {
                 if let Some(cap) = self.load_tool_capabilities(name).await {
+                    for secret_name in Self::tool_secret_names(&cap) {
+                        plan.add_base_secret(secret_name);
+                    }
+
                     if let Some(auth) = cap.auth {
                         plan.add_base_secret(&auth.secret_name);
                         plan.add_companion_secret(
@@ -2983,12 +2987,6 @@ impl ExtensionManager {
                             &auth.secret_name,
                             oauth_scopes_secret_name(&auth.secret_name),
                         );
-                    }
-
-                    if let Some(setup) = cap.setup {
-                        for secret in setup.required_secrets {
-                            plan.add_base_secret(secret.name);
-                        }
                     }
                 }
             }
@@ -3078,19 +3076,37 @@ impl ExtensionManager {
         let tools = discover_tools(&self.wasm_tools_dir)
             .await
             .map_err(|e| format!("discover tools: {e}"))?;
-        for tool_name in tools.keys() {
-            if let Some(cap) = self.load_tool_capabilities(tool_name).await {
-                referenced_secret_names.extend(Self::tool_secret_names(&cap));
-            }
+        for (tool_name, discovered_tool) in &tools {
+            let cap = self
+                .load_tool_capabilities(tool_name)
+                .await
+                .ok_or_else(|| {
+                    let path = discovered_tool
+                        .capabilities_path
+                        .as_ref()
+                        .map(|path| path.display().to_string())
+                        .unwrap_or_else(|| format!("{} (missing)", tool_name));
+                    format!("load tool capabilities for {tool_name}: {path}")
+                })?;
+            referenced_secret_names.extend(Self::tool_secret_names(&cap));
         }
 
         let channels = crate::channels::wasm::discover_channels(&self.wasm_channels_dir)
             .await
             .map_err(|e| format!("discover channels: {e}"))?;
-        for channel_name in channels.keys() {
-            if let Some(cap) = self.load_channel_capabilities(channel_name).await {
-                referenced_secret_names.extend(Self::channel_secret_names(&cap));
-            }
+        for (channel_name, discovered_channel) in &channels {
+            let cap = self
+                .load_channel_capabilities(channel_name)
+                .await
+                .ok_or_else(|| {
+                    let path = discovered_channel
+                        .capabilities_path
+                        .as_ref()
+                        .map(|path| path.display().to_string())
+                        .unwrap_or_else(|| format!("{} (missing)", channel_name));
+                    format!("load channel capabilities for {channel_name}: {path}")
+                })?;
+            referenced_secret_names.extend(Self::channel_secret_names(&cap));
         }
 
         let mcp_servers = self
@@ -3117,6 +3133,24 @@ impl ExtensionManager {
                     .iter()
                     .map(|secret| secret.name.to_lowercase()),
             );
+        }
+        if let Some(http) = &cap.http {
+            names.extend(
+                http.credentials
+                    .values()
+                    .map(|credential| credential.secret_name.to_lowercase()),
+            );
+        }
+        if let Some(webhook) = &cap.webhook {
+            if let Some(secret_name) = &webhook.secret_name {
+                names.insert(secret_name.to_lowercase());
+            }
+            if let Some(secret_name) = &webhook.signature_key_secret_name {
+                names.insert(secret_name.to_lowercase());
+            }
+            if let Some(secret_name) = &webhook.hmac_secret_name {
+                names.insert(secret_name.to_lowercase());
+            }
         }
 
         names
@@ -7575,6 +7609,17 @@ mod tests {
                     "required_secrets": [
                         { "name": "github_client_secret", "prompt": "GitHub client secret for testing cleanup behavior." }
                     ]
+                },
+                "http": {
+                    "credentials": {
+                        "service_token": {
+                            "secret_name": "github_service_token",
+                            "location": { "type": "bearer" }
+                        }
+                    }
+                },
+                "webhook": {
+                    "hmac_secret_name": "github_webhook_secret"
                 }
             }"#,
         );
@@ -7584,6 +7629,8 @@ mod tests {
         store_test_secret(&mgr, "github_token_refresh_token", "refresh-token").await;
         store_test_secret(&mgr, "github_token_scopes", "repo workflow").await;
         store_test_secret(&mgr, "github_client_secret", "client-secret").await;
+        store_test_secret(&mgr, "github_service_token", "service-token").await;
+        store_test_secret(&mgr, "github_webhook_secret", "webhook-secret").await;
 
         mgr.remove("github", "test")
             .await
@@ -7594,6 +7641,8 @@ mod tests {
             "github_token_refresh_token",
             "github_token_scopes",
             "github_client_secret",
+            "github_service_token",
+            "github_webhook_secret",
         ] {
             assert!(
                 !mgr.secrets
@@ -7601,6 +7650,43 @@ mod tests {
                     .await
                     .expect("exists query"),
                 "secret {secret_name} should be deleted"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_remove_wasm_tool_keeps_secrets_when_other_tool_capabilities_missing() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let tools_dir = write_test_tool(
+            dir.path(),
+            "github",
+            r#"{
+                "name": "github",
+                "auth": { "secret_name": "shared_token" }
+            }"#,
+        );
+        std::fs::write(tools_dir.join("broken.wasm"), b"fake-tool").expect("write tool");
+
+        let mgr = make_test_manager_with_dirs(None, tools_dir, dir.path().join("channels"), None);
+        store_test_secret(&mgr, "shared_token", "access-token").await;
+        store_test_secret(&mgr, "shared_token_refresh_token", "refresh-token").await;
+        store_test_secret(&mgr, "shared_token_scopes", "repo").await;
+
+        mgr.remove("github", "test")
+            .await
+            .expect("remove should succeed");
+
+        for secret_name in [
+            "shared_token",
+            "shared_token_refresh_token",
+            "shared_token_scopes",
+        ] {
+            assert!(
+                mgr.secrets
+                    .exists("test", secret_name)
+                    .await
+                    .expect("exists query"),
+                "secret {secret_name} should be retained when reference detection is uncertain"
             );
         }
     }
