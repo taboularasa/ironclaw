@@ -105,8 +105,8 @@ pub async fn create_client_from_config(
                     user_id,
                     Some(server),
                 )
-                    .with_nearai_session_manager(nearai_session_manager)
-                    .with_nearai_api_key(nearai_api_key));
+                .with_nearai_session_manager(nearai_session_manager)
+                .with_nearai_api_key(nearai_api_key));
             }
             if let Some(ref secrets) = secrets {
                 let has_tokens =
