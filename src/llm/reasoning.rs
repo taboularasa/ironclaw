@@ -1113,7 +1113,9 @@ Examples (tool calls use JSON format):\n\
 
         format!(
             "\n\n## Current Conversation\n\
-             This is who you're talking to (omit 'target' to send here):\n{}",
+             This is who you're talking to in the active conversation. Use normal assistant \
+             output to reply here; only use the `message` tool for proactive, background, or \
+             cross-channel outbound sends:\n{}",
             lines.join("\n")
         )
     }
@@ -2472,7 +2474,8 @@ That's my plan."#;
         let section = reasoning.build_extensions_section_for_tools(&tool_defs);
         assert!(section.contains("connect messaging platforms so users can talk to you there"));
         assert!(section.contains("Channels are not separate send-message tools"));
-        assert!(section.contains("`message` tool"));
+        assert!(section.contains("use normal assistant output to reply in the current conversation"));
+        assert!(section.contains("`message` tool only for proactive, background, or cross-channel outbound sends"));
     }
 
     #[test]
@@ -2487,6 +2490,18 @@ That's my plan."#;
         assert!(section.contains("Telegram: username or chat ID"));
         assert!(section.contains("Slack: channel name"));
         assert!(section.contains("Proactive follow-up here"));
+    }
+
+    #[test]
+    fn test_current_conversation_section_does_not_imply_message_tool_for_replies() {
+        let reasoning = make_test_reasoning()
+            .with_channel("telegram")
+            .with_conversation_data("User", "telegram-user");
+
+        let section = reasoning.build_conversation_section();
+        assert!(section.contains("Use normal assistant output to reply here"));
+        assert!(section.contains("only use the `message` tool for proactive, background, or cross-channel outbound sends"));
+        assert!(!section.contains("omit 'target' to send here"));
     }
 
     // ---- plan/evaluate bypass clean_response (Bug #564-2) ----

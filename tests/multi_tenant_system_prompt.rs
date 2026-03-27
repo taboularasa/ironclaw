@@ -257,6 +257,13 @@ mod tests {
              Actual system prompt:\n{system_prompt}"
         );
         assert!(
+            system_prompt.contains(
+                "use normal assistant output to reply in the current conversation"
+            ),
+            "System prompt should route ordinary replies through normal assistant output.\n\
+             Actual system prompt:\n{system_prompt}"
+        );
+        assert!(
             system_prompt.contains("respond normally without calling `message`"),
             "System prompt should say normal replies do not use the message tool.\n\
              Actual system prompt:\n{system_prompt}"
@@ -265,6 +272,11 @@ mod tests {
             system_prompt.contains("proactive follow-up in the current conversation"),
             "System prompt should reserve omitted channel/target for proactive follow-ups.\n\
              Actual system prompt:\n{system_prompt}"
+        );
+        assert!(
+            !system_prompt.contains("omit 'target' to send here"),
+            "System prompt should not imply the message tool is the default way to reply \
+             in-thread.\nActual system prompt:\n{system_prompt}"
         );
 
         rig.shutdown();
