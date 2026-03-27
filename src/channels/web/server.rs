@@ -3068,8 +3068,10 @@ mod tests {
 
     // --- OAuth callback handler tests ---
 
-    /// Build a minimal `GatewayState` for testing the OAuth callback handler.
-    fn test_gateway_state(ext_mgr: Option<Arc<ExtensionManager>>) -> Arc<GatewayState> {
+    fn test_gateway_state_inner(
+        ext_mgr: Option<Arc<ExtensionManager>>,
+        store: Option<Arc<dyn crate::db::Database>>,
+    ) -> Arc<GatewayState> {
         Arc::new(GatewayState {
             msg_tx: tokio::sync::RwLock::new(None),
             sse: Arc::new(SseManager::new()),
@@ -3080,7 +3082,7 @@ mod tests {
             log_level_handle: None,
             extension_manager: ext_mgr,
             tool_registry: None,
-            store: None,
+            store,
             job_manager: None,
             prompt_queue: None,
             owner_id: "test".to_string(),
@@ -3102,40 +3104,16 @@ mod tests {
         })
     }
 
+    /// Build a minimal `GatewayState` for testing the OAuth callback handler.
+    fn test_gateway_state(ext_mgr: Option<Arc<ExtensionManager>>) -> Arc<GatewayState> {
+        test_gateway_state_inner(ext_mgr, None)
+    }
+
     fn test_gateway_state_with_store(
         store: Arc<dyn crate::db::Database>,
         ext_mgr: Option<Arc<ExtensionManager>>,
     ) -> Arc<GatewayState> {
-        Arc::new(GatewayState {
-            msg_tx: tokio::sync::RwLock::new(None),
-            sse: Arc::new(SseManager::new()),
-            workspace: None,
-            workspace_pool: None,
-            session_manager: None,
-            log_broadcaster: None,
-            log_level_handle: None,
-            extension_manager: ext_mgr,
-            tool_registry: None,
-            store: Some(store),
-            job_manager: None,
-            prompt_queue: None,
-            owner_id: "test".to_string(),
-            default_sender_id: "test".to_string(),
-            shutdown_tx: tokio::sync::RwLock::new(None),
-            ws_tracker: None,
-            llm_provider: None,
-            skill_registry: None,
-            skill_catalog: None,
-            scheduler: None,
-            chat_rate_limiter: PerUserRateLimiter::new(30, 60),
-            oauth_rate_limiter: RateLimiter::new(10, 60),
-            webhook_rate_limiter: RateLimiter::new(10, 60),
-            registry_entries: vec![],
-            cost_guard: None,
-            routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
-            startup_time: std::time::Instant::now(),
-            active_config: ActiveConfigSnapshot::default(),
-        })
+        test_gateway_state_inner(ext_mgr, Some(store))
     }
 
     #[cfg(feature = "libsql")]

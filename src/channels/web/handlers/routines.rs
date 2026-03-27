@@ -14,8 +14,7 @@ use crate::agent::routine::{Trigger, next_cron_fire};
 use crate::channels::web::auth::AuthenticatedUser;
 use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::*;
-use crate::channels::web::util::sanitized_db_error;
-use crate::error::RoutineError;
+use crate::channels::web::util::{sanitized_db_error, sanitized_routine_error};
 
 pub async fn routines_list_handler(
     State(state): State<Arc<GatewayState>>,
@@ -164,7 +163,7 @@ pub async fn routines_trigger_handler(
     let run_id = engine
         .fire_manual(routine_id, Some(&user.user_id))
         .await
-        .map_err(|e| (routine_error_status(&e), e.to_string()))?;
+        .map_err(|e| sanitized_routine_error(e, "trigger routine manually"))?;
 
     Ok(Json(serde_json::json!({
         "status": "triggered",
@@ -336,16 +335,4 @@ pub async fn routines_runs_handler(
         "routine_id": routine_id,
         "runs": run_infos,
     })))
-}
-
-/// Map `RoutineError` variants to appropriate HTTP status codes.
-fn routine_error_status(err: &RoutineError) -> StatusCode {
-    match err {
-        RoutineError::NotFound { .. } => StatusCode::NOT_FOUND,
-        RoutineError::NotAuthorized { .. } => StatusCode::FORBIDDEN,
-        RoutineError::Disabled { .. }
-        | RoutineError::Cooldown { .. }
-        | RoutineError::MaxConcurrent { .. } => StatusCode::CONFLICT,
-        _ => StatusCode::INTERNAL_SERVER_ERROR,
-    }
 }

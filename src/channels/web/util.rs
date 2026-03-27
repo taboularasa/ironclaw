@@ -38,6 +38,34 @@ pub fn sanitized_internal_error_response<E: Display>(
     sanitized_internal_error(error, context, "Internal error")
 }
 
+/// Return safe client responses for `RoutineError` while preserving user-actionable variants.
+pub fn sanitized_routine_error(
+    error: crate::error::RoutineError,
+    context: &str,
+) -> (StatusCode, String) {
+    use crate::error::RoutineError;
+
+    match error {
+        err @ RoutineError::NotFound { .. } => (StatusCode::NOT_FOUND, err.to_string()),
+        err @ RoutineError::NotAuthorized { .. } => (StatusCode::FORBIDDEN, err.to_string()),
+        err @ RoutineError::Disabled { .. }
+        | err @ RoutineError::Cooldown { .. }
+        | err @ RoutineError::MaxConcurrent { .. } => (StatusCode::CONFLICT, err.to_string()),
+        err @ RoutineError::Database { .. } => sanitized_db_error(err, context),
+        err @ RoutineError::LlmFailed { .. }
+        | err @ RoutineError::JobDispatchFailed { .. }
+        | err @ RoutineError::EmptyResponse
+        | err @ RoutineError::TruncatedResponse
+        | err @ RoutineError::UnknownTriggerType { .. }
+        | err @ RoutineError::UnknownActionType { .. }
+        | err @ RoutineError::MissingField { .. }
+        | err @ RoutineError::InvalidCron { .. }
+        | err @ RoutineError::UnknownRunStatus { .. } => {
+            sanitized_internal_error_response(err, context)
+        }
+    }
+}
+
 /// Parse tool call summary JSON objects into `ToolCallInfo` structs.
 fn parse_tool_call_infos(calls: &[serde_json::Value]) -> Vec<ToolCallInfo> {
     calls
@@ -168,6 +196,17 @@ mod tests {
         let (_, body) =
             sanitized_internal_error_response("container launch failed: timeout", "restart job");
         assert_eq!(body, "Internal error");
+    }
+
+    #[test]
+    fn test_sanitized_routine_error_hides_database_details() {
+        let (_, body) = sanitized_routine_error(
+            crate::error::RoutineError::Database {
+                reason: "sqlite: no such table: routine_runs".to_string(),
+            },
+            "trigger routine",
+        );
+        assert_eq!(body, "Database error");
     }
 
     // ---- build_turns_from_db_messages tests ----
