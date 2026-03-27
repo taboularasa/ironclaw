@@ -32,9 +32,10 @@ impl Tool for ToolSearchTool {
     fn description(&self) -> &str {
         "Search for available extensions to add new capabilities. Extensions include \
          channels (Telegram, Slack, Discord — connect messaging platforms so IronClaw can \
-         receive and reply there), tools, and MCP servers. Install and activate channels here; \
-         use the `message` tool for proactive outbound sends. Use discover:true to search online \
-         if the built-in registry has no results."
+         receive and reply there), tools, and MCP servers. Use `tool_install` and \
+         `tool_activate` to install and enable channels; use the `message` tool for proactive \
+         outbound sends. Use discover:true to search online if the built-in registry has no \
+         results."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -643,7 +644,7 @@ mod tests {
         };
 
         let description = tool.description();
-        assert!(description.contains("Install and activate channels here"));
+        assert!(description.contains("Use `tool_install` and `tool_activate`"));
         assert!(description.contains("use the `message` tool for proactive outbound sends"));
     }
 
