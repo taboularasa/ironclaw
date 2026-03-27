@@ -5181,6 +5181,14 @@ function loadInferenceSettings() {
     title.textContent = I18n.t('cfg.group.llm');
     group.appendChild(title);
 
+    var notice = document.createElement('div');
+    notice.className = 'config-notice';
+    notice.id = 'llm-restart-notice';
+    var restartNoticeEl = document.getElementById('config-restart-notice');
+    notice.style.display = (restartNoticeEl && restartNoticeEl.style.display !== 'none') ? 'flex' : 'none';
+    notice.innerHTML = '<span>\u26A0</span><span>' + escapeHtml(I18n.t('config.restartNotice')) + '</span>';
+    group.appendChild(notice);
+
     var backendRow = document.createElement('div');
     backendRow.className = 'settings-row';
     backendRow.innerHTML =
@@ -6338,6 +6346,8 @@ function setActiveProvider(id) {
       loadInferenceSettings();
       scrollToProviders();
       document.getElementById('config-restart-notice').style.display = 'flex';
+      var llmNotice = document.getElementById('llm-restart-notice');
+      if (llmNotice) llmNotice.style.display = 'flex';
       showToast(I18n.t('config.providerActivated', { name: id }));
     })
     .catch((e) => showToast(I18n.t('error.unknown') + ': ' + e.message, 'error'));
@@ -6563,6 +6573,8 @@ document.getElementById('save-provider-btn').addEventListener('click', () => {
         scrollToProviders();
         if (isActive) {
           document.getElementById('config-restart-notice').style.display = 'flex';
+          var llmNotice = document.getElementById('llm-restart-notice');
+          if (llmNotice) llmNotice.style.display = 'flex';
         }
         showToast(I18n.t('config.providerConfigured', { name: id }));
       })
@@ -6616,6 +6628,8 @@ document.getElementById('save-provider-btn').addEventListener('click', () => {
       scrollToProviders();
       if (isActive) {
         document.getElementById('config-restart-notice').style.display = 'flex';
+        var llmNotice = document.getElementById('llm-restart-notice');
+        if (llmNotice) llmNotice.style.display = 'flex';
       }
       showToast(I18n.t('config.providerUpdated', { name }));
     }).catch((e) => {
