@@ -48,7 +48,12 @@ pub async fn users_create_handler(
         ))?
         .to_string();
 
-    let email = body.get("email").and_then(|v| v.as_str()).map(String::from);
+    let email = body
+        .get("email")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(String::from);
     let role = body
         .get("role")
         .and_then(|v| v.as_str())

@@ -2560,7 +2560,7 @@ impl Store {
                   AND (t.expires_at IS NULL OR t.expires_at > NOW())
                   AND u.status = 'active'
                 "#,
-                &[&token_hash.to_vec()],
+                &[&token_hash.as_slice()],
             )
             .await?;
         Ok(row.map(|r| {

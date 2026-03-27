@@ -78,6 +78,8 @@ pub async fn secrets_put_handler(
         params = params.with_expiry(exp);
     }
 
+    let already_exists = secrets.exists(&user_id, &name).await.unwrap_or(false);
+
     secrets
         .create(&user_id, params)
         .await
@@ -86,7 +88,7 @@ pub async fn secrets_put_handler(
     Ok(Json(serde_json::json!({
         "user_id": user_id,
         "name": name,
-        "status": "created",
+        "status": if already_exists { "updated" } else { "created" },
     })))
 }
 

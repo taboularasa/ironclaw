@@ -651,31 +651,31 @@ async fn async_main() -> anyhow::Result<()> {
                     created_by: None,
                     metadata: serde_json::json!({"source": "bootstrap"}),
                 };
-                if let Err(e) = d.create_user(&user).await {
-                    tracing::warn!("Failed to bootstrap admin user: {}", e);
-                } else {
-                    // Also create an API token from the gateway auth token so
-                    // DB-backed auth works for the bootstrapped user.
-                    let auth_token = gw.auth_token();
-                    if !auth_token.is_empty() {
-                        use ironclaw::channels::web::auth::hash_token;
-                        let hash = hash_token(auth_token);
-                        let prefix = if auth_token.len() >= 8 {
-                            &auth_token[..8]
-                        } else {
-                            auth_token
-                        };
-                        if let Err(e) = d
-                            .create_api_token(&config.owner_id, "bootstrap", &hash, prefix, None)
-                            .await
-                        {
-                            tracing::warn!("Failed to create bootstrap token: {}", e);
-                        }
+                // Create admin user + bootstrap token atomically.
+                let auth_token = gw.auth_token();
+                if auth_token.is_empty() {
+                    if let Err(e) = d.create_user(&user).await {
+                        tracing::warn!("Failed to bootstrap admin user: {}", e);
                     }
-                    tracing::info!(
-                        user_id = config.owner_id,
-                        "Bootstrapped admin user from gateway config"
-                    );
+                } else {
+                    use ironclaw::channels::web::auth::hash_token;
+                    let hash = hash_token(auth_token);
+                    let prefix = if auth_token.len() >= 8 {
+                        &auth_token[..8]
+                    } else {
+                        auth_token
+                    };
+                    if let Err(e) = d
+                        .create_user_with_token(&user, "bootstrap", &hash, prefix, None)
+                        .await
+                    {
+                        tracing::warn!("Failed to bootstrap admin user: {}", e);
+                    } else {
+                        tracing::info!(
+                            user_id = config.owner_id,
+                            "Bootstrapped admin user from gateway config"
+                        );
+                    }
                 }
             }
         }
