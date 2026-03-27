@@ -858,6 +858,15 @@ pub struct EngineMissionListResponse {
 }
 
 #[derive(Debug, Serialize)]
+pub struct EngineMissionSummaryResponse {
+    pub total: u64,
+    pub active: u64,
+    pub paused: u64,
+    pub completed: u64,
+    pub failed: u64,
+}
+
+#[derive(Debug, Serialize)]
 pub struct EngineMissionDetailResponse {
     pub mission: crate::bridge::EngineMissionDetail,
 }

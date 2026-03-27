@@ -94,6 +94,29 @@ pub async fn engine_missions_handler(
     Ok(Json(EngineMissionListResponse { missions }))
 }
 
+pub async fn engine_missions_summary_handler(
+    State(_state): State<Arc<GatewayState>>,
+    AuthenticatedUser(_user): AuthenticatedUser,
+) -> Result<Json<EngineMissionSummaryResponse>, (StatusCode, String)> {
+    let missions = crate::bridge::list_engine_missions(None)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let total = missions.len() as u64;
+    let active = missions.iter().filter(|m| m.status == "Active").count() as u64;
+    let paused = missions.iter().filter(|m| m.status == "Paused").count() as u64;
+    let completed = missions.iter().filter(|m| m.status == "Completed").count() as u64;
+    let failed = missions.iter().filter(|m| m.status == "Failed").count() as u64;
+
+    Ok(Json(EngineMissionSummaryResponse {
+        total,
+        active,
+        paused,
+        completed,
+        failed,
+    }))
+}
+
 pub async fn engine_mission_detail_handler(
     State(_state): State<Arc<GatewayState>>,
     AuthenticatedUser(_user): AuthenticatedUser,

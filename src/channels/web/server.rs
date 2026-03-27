@@ -35,9 +35,9 @@ use crate::channels::web::auth::{
 };
 use crate::channels::web::handlers::engine::{
     engine_mission_detail_handler, engine_mission_fire_handler, engine_mission_pause_handler,
-    engine_mission_resume_handler, engine_missions_handler, engine_project_detail_handler,
-    engine_projects_handler, engine_thread_detail_handler, engine_thread_events_handler,
-    engine_thread_steps_handler, engine_threads_handler,
+    engine_mission_resume_handler, engine_missions_handler, engine_missions_summary_handler,
+    engine_project_detail_handler, engine_projects_handler, engine_thread_detail_handler,
+    engine_thread_events_handler, engine_thread_steps_handler, engine_threads_handler,
 };
 use crate::channels::web::handlers::jobs::{
     job_files_list_handler, job_files_read_handler, jobs_cancel_handler, jobs_detail_handler,
@@ -517,6 +517,10 @@ pub async fn start_server(
             get(engine_project_detail_handler),
         )
         .route("/api/engine/missions", get(engine_missions_handler))
+        .route(
+            "/api/engine/missions/summary",
+            get(engine_missions_summary_handler),
+        )
         .route(
             "/api/engine/missions/{id}",
             get(engine_mission_detail_handler),
