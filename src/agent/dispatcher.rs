@@ -444,7 +444,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
             let record = crate::history::LlmCallRecord {
                 job_id: None,
                 conversation_id: Some(self.thread_id),
-                provider: self.agent.llm().model_name(),
+                provider: &self.agent.deps.llm_backend,
                 model: &model_name,
                 input_tokens: output.usage.input_tokens,
                 output_tokens: output.usage.output_tokens,

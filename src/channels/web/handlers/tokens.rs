@@ -28,9 +28,11 @@ pub async fn tokens_create_handler(
     let name = body
         .get("name")
         .and_then(|v| v.as_str())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
         .ok_or((
             StatusCode::BAD_REQUEST,
-            "Missing required field 'name'".to_string(),
+            "Missing or empty 'name'".to_string(),
         ))?
         .to_string();
 

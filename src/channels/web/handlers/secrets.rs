@@ -98,13 +98,16 @@ pub async fn secrets_list_handler(
     AdminUser(_admin): AdminUser,
     Path(user_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    // Verify the target user exists.
-    if let Some(store) = state.store.as_ref()
-        && store
-            .get_user(&user_id)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-            .is_none()
+    // Verify the target user exists (consistent with PUT/DELETE).
+    let store = state.store.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Database not available".to_string(),
+    ))?;
+    if store
+        .get_user(&user_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .is_none()
     {
         return Err((StatusCode::NOT_FOUND, "User not found".to_string()));
     }

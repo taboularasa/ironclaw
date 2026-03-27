@@ -530,7 +530,7 @@ All error responses return a plain text body with the error message and the corr
 
 | Column | Type (PG / libSQL) | Notes |
 |--------|--------------------|-------|
-| `id` | `TEXT` / `TEXT` | Primary key; values are UUID v4 strings |
+| `id` | `TEXT` / `TEXT` | Primary key; typically UUID v4 strings (bootstrap admin may use a custom ID) |
 | `email` | `TEXT UNIQUE` | Nullable |
 | `display_name` | `TEXT NOT NULL` | |
 | `status` | `TEXT NOT NULL` | `"active"` or `"suspended"` |
