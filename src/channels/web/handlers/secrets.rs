@@ -78,7 +78,10 @@ pub async fn secrets_put_handler(
         params = params.with_expiry(exp);
     }
 
-    let already_exists = secrets.exists(&user_id, &name).await.unwrap_or(false);
+    let already_exists = secrets
+        .exists(&user_id, &name)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     secrets
         .create(&user_id, params)

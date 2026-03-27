@@ -46,7 +46,8 @@ pub struct GatewayConfig {
     /// Additional user scopes for workspace reads.
     ///
     /// When set, the workspace will be able to read (search, read, list) from
-    /// these additional user scopes while writes remain isolated to `user_id`.
+    /// these additional user scopes while writes remain isolated to the
+    /// authenticated user's own scope.
     /// Parsed from `WORKSPACE_READ_SCOPES` (comma-separated).
     pub workspace_read_scopes: Vec<String>,
     /// Memory layer definitions (JSON in env var, or from external config).
