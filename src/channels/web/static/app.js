@@ -184,7 +184,7 @@ function authenticate() {
       cleaned.searchParams.delete('log_level');
       window.history.replaceState({}, '', cleaned.pathname + cleaned.search);
       connectSSE();
-      connectLogSSE();
+      // Log SSE is connected lazily when the logs tab is opened (saves a connection slot).
       startGatewayStatusPolling();
       checkTeeStatus();
       loadThreads();
@@ -221,6 +221,20 @@ document.getElementById('token-input').addEventListener('keydown', (e) => {
 window.addEventListener('beforeunload', () => {
   if (eventSource) { eventSource.close(); eventSource = null; }
   if (logEventSource) { logEventSource.close(); logEventSource = null; }
+});
+
+// Pause SSE when the browser tab is hidden (another tab is focused) and resume
+// when it becomes visible again. This frees connection slots for other tabs
+// running the gateway — without this, each tab holds 1-2 SSE connections and
+// the 3rd tab exhausts the browser's per-origin limit.
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    if (eventSource) { eventSource.close(); eventSource = null; }
+    if (logEventSource) { logEventSource.close(); logEventSource = null; }
+  } else if (token) {
+    connectSSE();
+    if (currentTab === 'logs') connectLogSSE();
+  }
 });
 
 // Note: main event listener registration is at the bottom of this file (search
@@ -2222,7 +2236,8 @@ function switchTab(tab) {
   if (tab === 'jobs') loadJobs();
   if (tab === 'missions') loadMissions();
   if (tab === 'routines') loadRoutines();
-  if (tab === 'logs') applyLogFilters();
+  if (tab === 'logs') { connectLogSSE(); applyLogFilters(); }
+  else if (logEventSource) { logEventSource.close(); logEventSource = null; }
   if (tab === 'settings') {
     loadSettingsSubtab(currentSettingsSubtab);
   } else {
