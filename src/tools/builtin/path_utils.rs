@@ -4,8 +4,120 @@
 //! attacks and ensure paths stay within allowed sandboxes.
 
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 
 use crate::tools::tool::ToolError;
+
+/// Paths that contain credentials, secrets, or private keys.
+/// Used by both file tools (exact path check) and shell tool (substring scan).
+/// Keep sorted by category for readability.
+static SENSITIVE_PATH_PATTERNS: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
+    vec![
+        // SSH
+        "/.ssh/",
+        "/id_rsa",
+        "/id_ed25519",
+        "/id_ecdsa",
+        "/id_dsa",
+        "/authorized_keys",
+        "/known_hosts",
+        // GPG
+        "/.gnupg/",
+        // AWS
+        "/.aws/credentials",
+        "/.aws/config",
+        // Kubernetes
+        "/.kube/config",
+        // Cloud providers
+        "/.azure/",
+        "/.gcloud/",
+        "/.config/gcloud/",
+        // Terraform
+        "/.terraform.d/credentials.tfrc.json",
+        // GitHub CLI
+        "/.config/gh/hosts.yml",
+        // Docker
+        "/.docker/config.json",
+        // Vault
+        "/.vault-token",
+        // Shell history
+        "/.bash_history",
+        "/.zsh_history",
+        "/.histfile",
+        // Env files (may contain secrets)
+        "/.env",
+        // Git credentials
+        "/.git-credentials",
+        "/.netrc",
+        "/.pgpass",
+        // IronClaw's own secrets
+        "/.ironclaw/secrets/",
+        // System
+        "/etc/shadow",
+        "/etc/gshadow",
+    ]
+});
+
+/// File extensions that are always sensitive regardless of location.
+static SENSITIVE_EXTENSIONS: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
+    vec![".pem", ".key", ".p12", ".pfx", ".jks", ".keystore"]
+});
+
+/// Suffixes that indicate a file is safe despite matching a sensitive pattern
+/// (e.g., `.env.example`, `.env.sample`).
+static SAFE_SUFFIXES: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
+    vec![".example", ".sample", ".template", ".dist", ".bak.example"]
+});
+
+/// Check if a resolved file path points to a sensitive location.
+/// Used by file tools (read, write, list_dir, apply_patch).
+pub fn is_sensitive_path(path: &Path) -> bool {
+    let path_str = match path.canonicalize() {
+        Ok(p) => p.to_string_lossy().to_string(),
+        Err(_) => path.to_string_lossy().to_string(),
+    };
+
+    // Safe suffixes override sensitive patterns
+    let lower = path_str.to_lowercase();
+    if SAFE_SUFFIXES.iter().any(|s| lower.ends_with(s)) {
+        return false;
+    }
+
+    // Check sensitive path patterns
+    if SENSITIVE_PATH_PATTERNS.iter().any(|p| path_str.contains(p)) {
+        return true;
+    }
+
+    // Check sensitive file extensions
+    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        let dot_ext = format!(".{}", ext.to_lowercase());
+        if SENSITIVE_EXTENSIONS.iter().any(|e| *e == dot_ext) {
+            return true;
+        }
+    }
+
+    false
+}
+
+/// Scan a shell command string for references to sensitive paths.
+/// Returns the first matched pattern, or None if the command is clean.
+/// Used by the shell tool to block `cat ~/.ssh/id_rsa` etc.
+pub fn command_references_sensitive_path(command: &str) -> Option<&'static str> {
+    let normalized = command.to_lowercase();
+
+    for pattern in SENSITIVE_PATH_PATTERNS.iter() {
+        // For path patterns, check case-insensitively
+        if normalized.contains(&pattern.to_lowercase()) {
+            return Some(pattern);
+        }
+    }
+
+    // Check for sensitive extensions in file arguments
+    SENSITIVE_EXTENSIONS
+        .iter()
+        .find(|ext| normalized.contains(*ext))
+        .copied()
+}
 
 /// Normalize a path by resolving `.` and `..` components lexically (no filesystem access).
 ///
@@ -235,5 +347,91 @@ mod tests {
         // This should be allowed as it stays within the sandbox
         let result = validate_path("a/b/../c.txt", Some(dir.path()));
         assert!(result.is_ok());
+    }
+
+    // ── sensitive path tests ──
+
+    #[test]
+    fn test_is_sensitive_path_blocks_ssh() {
+        assert!(is_sensitive_path(Path::new("/home/user/.ssh/id_rsa")));
+        assert!(is_sensitive_path(Path::new("/home/user/.ssh/authorized_keys")));
+        assert!(is_sensitive_path(Path::new("/root/.ssh/config")));
+    }
+
+    #[test]
+    fn test_is_sensitive_path_blocks_cloud_credentials() {
+        assert!(is_sensitive_path(Path::new("/home/user/.aws/credentials")));
+        assert!(is_sensitive_path(Path::new("/home/user/.kube/config")));
+        assert!(is_sensitive_path(Path::new("/home/user/.azure/some_token")));
+        assert!(is_sensitive_path(Path::new(
+            "/home/user/.config/gh/hosts.yml"
+        )));
+    }
+
+    #[test]
+    fn test_is_sensitive_path_blocks_system_secrets() {
+        assert!(is_sensitive_path(Path::new("/etc/shadow")));
+        assert!(is_sensitive_path(Path::new("/etc/gshadow")));
+    }
+
+    #[test]
+    fn test_is_sensitive_path_blocks_key_files_by_extension() {
+        assert!(is_sensitive_path(Path::new("/tmp/server.pem")));
+        assert!(is_sensitive_path(Path::new("/app/certs/private.key")));
+        assert!(is_sensitive_path(Path::new("/home/user/keystore.p12")));
+    }
+
+    #[test]
+    fn test_is_sensitive_path_allows_safe_suffixes() {
+        assert!(!is_sensitive_path(Path::new("/app/.env.example")));
+        assert!(!is_sensitive_path(Path::new("/app/.env.sample")));
+        assert!(!is_sensitive_path(Path::new("/app/.env.template")));
+    }
+
+    #[test]
+    fn test_is_sensitive_path_allows_normal_files() {
+        assert!(!is_sensitive_path(Path::new("/app/src/main.rs")));
+        assert!(!is_sensitive_path(Path::new("/home/user/README.md")));
+        assert!(!is_sensitive_path(Path::new("/tmp/output.json")));
+    }
+
+    #[test]
+    fn test_is_sensitive_path_blocks_env_files() {
+        assert!(is_sensitive_path(Path::new("/app/.env")));
+        assert!(is_sensitive_path(Path::new("/app/.env.local")));
+        assert!(is_sensitive_path(Path::new("/app/.env.production")));
+    }
+
+    // ── command scanning tests ──
+
+    #[test]
+    fn test_command_references_sensitive_path_catches_cat_ssh() {
+        assert!(command_references_sensitive_path("cat ~/.ssh/id_rsa").is_some());
+        assert!(command_references_sensitive_path("head -n 5 /home/user/.ssh/authorized_keys").is_some());
+    }
+
+    #[test]
+    fn test_command_references_sensitive_path_catches_aws() {
+        assert!(command_references_sensitive_path("cat ~/.aws/credentials").is_some());
+        assert!(command_references_sensitive_path("grep key ~/.aws/config").is_some());
+    }
+
+    #[test]
+    fn test_command_references_sensitive_path_catches_etc_shadow() {
+        assert!(command_references_sensitive_path("cat /etc/shadow").is_some());
+    }
+
+    #[test]
+    fn test_command_references_sensitive_path_catches_key_extensions() {
+        assert!(command_references_sensitive_path("cp server.pem /tmp/").is_some());
+        assert!(command_references_sensitive_path("cat private.key").is_some());
+    }
+
+    #[test]
+    fn test_command_references_sensitive_path_allows_safe_commands() {
+        assert!(command_references_sensitive_path("ls -la").is_none());
+        assert!(command_references_sensitive_path("cargo build").is_none());
+        assert!(command_references_sensitive_path("git status").is_none());
+        assert!(command_references_sensitive_path("cat README.md").is_none());
     }
 }

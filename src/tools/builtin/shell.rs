@@ -83,6 +83,9 @@ static BLOCKED_COMMANDS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
 });
 
 /// Patterns that indicate potentially dangerous commands.
+/// Note: sensitive file paths (/.ssh/, /etc/shadow, etc.) are now handled by
+/// `command_references_sensitive_path` in path_utils.rs for consistency with
+/// file tool protections. This list covers command-level dangers only.
 static DANGEROUS_PATTERNS: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
     vec![
         "sudo ",
@@ -93,11 +96,6 @@ static DANGEROUS_PATTERNS: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
         "eval ",
         "$(curl",
         "$(wget",
-        "/etc/passwd",
-        "/etc/shadow",
-        "~/.ssh",
-        ".bash_history",
-        "id_rsa",
     ]
 });
 
@@ -620,6 +618,11 @@ impl ShellTool {
                     return Some("Command contains potentially dangerous pattern");
                 }
             }
+        }
+
+        // Block commands that reference sensitive file paths (shared with file tools)
+        if super::path_utils::command_references_sensitive_path(cmd).is_some() {
+            return Some("Command references sensitive file path");
         }
 
         None
