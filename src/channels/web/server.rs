@@ -3102,6 +3102,55 @@ mod tests {
         })
     }
 
+    fn test_gateway_state_with_store(
+        store: Arc<dyn crate::db::Database>,
+        ext_mgr: Option<Arc<ExtensionManager>>,
+    ) -> Arc<GatewayState> {
+        Arc::new(GatewayState {
+            msg_tx: tokio::sync::RwLock::new(None),
+            sse: Arc::new(SseManager::new()),
+            workspace: None,
+            workspace_pool: None,
+            session_manager: None,
+            log_broadcaster: None,
+            log_level_handle: None,
+            extension_manager: ext_mgr,
+            tool_registry: None,
+            store: Some(store),
+            job_manager: None,
+            prompt_queue: None,
+            owner_id: "test".to_string(),
+            default_sender_id: "test".to_string(),
+            shutdown_tx: tokio::sync::RwLock::new(None),
+            ws_tracker: None,
+            llm_provider: None,
+            skill_registry: None,
+            skill_catalog: None,
+            scheduler: None,
+            chat_rate_limiter: PerUserRateLimiter::new(30, 60),
+            oauth_rate_limiter: RateLimiter::new(10, 60),
+            webhook_rate_limiter: RateLimiter::new(10, 60),
+            registry_entries: vec![],
+            cost_guard: None,
+            routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
+            startup_time: std::time::Instant::now(),
+            active_config: ActiveConfigSnapshot::default(),
+        })
+    }
+
+    #[cfg(feature = "libsql")]
+    async fn create_unmigrated_test_db() -> (Arc<dyn crate::db::Database>, tempfile::TempDir) {
+        use crate::db::libsql::LibSqlBackend;
+
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let db_path = temp_dir.path().join("test.db");
+        let backend = LibSqlBackend::new_local(&db_path)
+            .await
+            .expect("LibSqlBackend");
+        let db: Arc<dyn crate::db::Database> = Arc::new(backend);
+        (db, temp_dir)
+    }
+
     /// Build a test router with just the OAuth callback route.
     fn test_oauth_router(state: Arc<GatewayState>) -> Router {
         Router::new()
@@ -3340,6 +3389,47 @@ mod tests {
                 .contains("Activation failed"),
             "expected activation failure in message: {:?}",
             parsed
+        );
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_routines_list_sanitizes_database_errors() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let (db, _tmp) = create_unmigrated_test_db().await;
+        let state = test_gateway_state_with_store(db, None);
+        let app = Router::new()
+            .route(
+                "/api/routines",
+                get(crate::channels::web::handlers::routines::routines_list_handler),
+            )
+            .with_state(state);
+
+        let mut req = axum::http::Request::builder()
+            .method("GET")
+            .uri("/api/routines")
+            .body(Body::empty())
+            .expect("request");
+        req.extensions_mut().insert(UserIdentity {
+            user_id: "test".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+            .await
+            .expect("body");
+        let text = String::from_utf8(body.to_vec()).expect("utf8 body");
+        assert_eq!(text, "Database error");
+        assert!(
+            !text.contains("no such table"),
+            "client response should not leak backend error details"
         );
     }
 
