@@ -2994,8 +2994,8 @@ impl ExtensionManager {
             }
             ExtensionKind::WasmChannel => {
                 if let Some(cap) = self.load_channel_capabilities(name).await {
-                    for secret in cap.setup.required_secrets {
-                        plan.add_base_secret(secret.name);
+                    for secret_name in Self::channel_secret_names(&cap) {
+                        plan.add_base_secret(secret_name);
                     }
                 }
             }
@@ -3125,11 +3125,39 @@ impl ExtensionManager {
     fn channel_secret_names(
         cap: &crate::channels::wasm::ChannelCapabilitiesFile,
     ) -> HashSet<String> {
-        cap.setup
+        let mut names: HashSet<String> = cap
+            .setup
             .required_secrets
             .iter()
             .map(|secret| secret.name.to_lowercase())
-            .collect()
+            .collect();
+
+        if let Some(http) = cap.capabilities.tool.http.as_ref() {
+            names.extend(
+                http.credentials
+                    .values()
+                    .map(|credential| credential.secret_name.to_lowercase()),
+            );
+        }
+
+        if let Some(webhook) = cap
+            .capabilities
+            .channel
+            .as_ref()
+            .and_then(|channel| channel.webhook.as_ref())
+        {
+            if webhook.secret_header.is_some() || webhook.secret_name.is_some() {
+                names.insert(cap.webhook_secret_name().to_lowercase());
+            }
+            if let Some(secret_name) = cap.signature_key_secret_name() {
+                names.insert(secret_name.to_lowercase());
+            }
+            if let Some(secret_name) = cap.hmac_secret_name() {
+                names.insert(secret_name.to_lowercase());
+            }
+        }
+
+        names
     }
 
     fn mcp_server_secret_names(server: &McpServerConfig) -> HashSet<String> {
@@ -7711,24 +7739,48 @@ mod tests {
                             "prompt": "Telegram bot token used to verify uninstall cleanup behavior."
                         }
                     ]
+                },
+                "capabilities": {
+                    "http": {
+                        "credentials": {
+                            "tenant_token": {
+                                "secret_name": "telegram_service_token",
+                                "location": { "type": "bearer" }
+                            }
+                        }
+                    },
+                    "channel": {
+                        "webhook": {
+                            "secret_header": "X-Telegram-Bot-Api-Secret-Token",
+                            "secret_name": "telegram_webhook_secret"
+                        }
+                    }
                 }
             }"#,
         );
         let mgr = make_test_manager_with_dirs(None, dir.path().join("tools"), channels_dir, None);
 
         store_test_secret(&mgr, "telegram_bot_token", "123:telegram-token").await;
+        store_test_secret(&mgr, "telegram_service_token", "tenant-service-token").await;
+        store_test_secret(&mgr, "telegram_webhook_secret", "webhook-secret").await;
 
         mgr.remove("telegram", "test")
             .await
             .expect("remove should succeed");
 
-        assert!(
-            !mgr.secrets
-                .exists("test", "telegram_bot_token")
-                .await
-                .expect("exists query"),
-            "channel setup secret should be deleted"
-        );
+        for secret_name in [
+            "telegram_bot_token",
+            "telegram_service_token",
+            "telegram_webhook_secret",
+        ] {
+            assert!(
+                !mgr.secrets
+                    .exists("test", secret_name)
+                    .await
+                    .expect("exists query"),
+                "channel secret {secret_name} should be deleted"
+            );
+        }
     }
 
     #[tokio::test]
