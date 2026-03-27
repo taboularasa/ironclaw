@@ -82,6 +82,7 @@ fn build_state(
         startup_time: std::time::Instant::now(),
         active_config: ActiveConfigSnapshot::default(),
         secrets_store: None,
+        db_auth: None,
     })
 }
 

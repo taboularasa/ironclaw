@@ -151,6 +151,11 @@ pub async fn tokens_revoke_handler(
         return Err((StatusCode::NOT_FOUND, "Token not found".to_string()));
     }
 
+    // Evict cached auth so revocation takes effect immediately.
+    if let Some(ref db_auth) = state.db_auth {
+        db_auth.invalidate_user(&user.user_id).await;
+    }
+
     Ok(Json(serde_json::json!({
         "status": "revoked",
         "id": token_id.to_string(),

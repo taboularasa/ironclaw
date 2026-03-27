@@ -239,6 +239,10 @@ pub async fn users_update_handler(
                 .update_user_role(&id, role)
                 .await
                 .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            // Evict cached auth so role change takes effect immediately.
+            if let Some(ref db_auth) = state.db_auth {
+                db_auth.invalidate_user(&id).await;
+            }
         }
     }
 
@@ -289,6 +293,11 @@ pub async fn users_suspend_handler(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
+    // Evict cached auth so suspension takes effect immediately.
+    if let Some(ref db_auth) = state.db_auth {
+        db_auth.invalidate_user(&id).await;
+    }
+
     Ok(Json(serde_json::json!({
         "id": id,
         "status": "suspended",
@@ -317,6 +326,11 @@ pub async fn users_activate_handler(
         .update_user_status(&id, "active")
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // Evict cached auth so reactivation takes effect immediately.
+    if let Some(ref db_auth) = state.db_auth {
+        db_auth.invalidate_user(&id).await;
+    }
 
     Ok(Json(serde_json::json!({
         "id": id,

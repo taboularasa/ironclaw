@@ -116,6 +116,7 @@ impl GatewayChannel {
             startup_time: std::time::Instant::now(),
             active_config: server::ActiveConfigSnapshot::default(),
             secrets_store: None,
+            db_auth: None,
         });
 
         Self {
@@ -157,6 +158,7 @@ impl GatewayChannel {
             startup_time: self.state.startup_time,
             active_config: self.state.active_config.clone(),
             secrets_store: self.state.secrets_store.clone(),
+            db_auth: self.state.db_auth.clone(),
         };
         mutate(&mut new_state);
         self.state = Arc::new(new_state);
@@ -206,7 +208,12 @@ impl GatewayChannel {
 
     /// Enable DB-backed token authentication alongside env-var tokens.
     pub fn with_db_auth(mut self, store: Arc<dyn Database>) -> Self {
-        self.auth.db_auth = Some(DbAuthenticator::new(store));
+        let authenticator = DbAuthenticator::new(store);
+        // Share the same DbAuthenticator (and its cache) between the auth
+        // middleware and GatewayState so handlers can invalidate the cache
+        // on security-critical actions (suspend, role change, token revoke).
+        self.rebuild_state(|s| s.db_auth = Some(Arc::new(authenticator.clone())));
+        self.auth.db_auth = Some(authenticator);
         self
     }
 

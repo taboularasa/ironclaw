@@ -155,6 +155,25 @@ impl DbAuthenticator {
         }
     }
 
+    /// Evict all cached entries for a specific user.
+    ///
+    /// Call this after security-critical actions (suspend, activate, role
+    /// change, token revocation) so the change takes effect immediately
+    /// instead of waiting for the 60-second TTL to expire.
+    pub async fn invalidate_user(&self, user_id: &str) {
+        let mut cache = self.cache.write().await;
+        // LruCache doesn't support predicate-based removal, so collect keys
+        // first then remove. The cache is bounded (1024) so this is cheap.
+        let keys_to_remove: Vec<[u8; 32]> = cache
+            .iter()
+            .filter(|(_, (identity, _))| identity.user_id == user_id)
+            .map(|(k, _)| *k)
+            .collect();
+        for key in keys_to_remove {
+            cache.pop(&key);
+        }
+    }
+
     /// Authenticate a token against the database, using cache when possible.
     ///
     /// Returns `Ok(Some(identity))` on success, `Ok(None)` if the token is

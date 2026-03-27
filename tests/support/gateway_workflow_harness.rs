@@ -241,6 +241,7 @@ impl GatewayWorkflowHarness {
             startup_time: Instant::now(),
             active_config: ironclaw::channels::web::server::ActiveConfigSnapshot::default(),
             secrets_store: None,
+            db_auth: None,
         });
 
         let mut agent = Agent::new(

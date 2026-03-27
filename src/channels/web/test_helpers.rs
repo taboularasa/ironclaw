@@ -92,6 +92,7 @@ impl TestGatewayBuilder {
             startup_time: std::time::Instant::now(),
             active_config: crate::channels::web::server::ActiveConfigSnapshot::default(),
             secrets_store: None,
+            db_auth: None,
         })
     }
 

@@ -389,6 +389,8 @@ pub struct GatewayState {
     pub active_config: ActiveConfigSnapshot,
     /// Secrets store for admin secret provisioning.
     pub secrets_store: Option<Arc<dyn crate::secrets::SecretsStore + Send + Sync>>,
+    /// DB auth cache for invalidation on security-critical actions.
+    pub db_auth: Option<Arc<crate::channels::web::auth::DbAuthenticator>>,
 }
 
 /// Start the gateway HTTP server.
@@ -3082,6 +3084,7 @@ mod tests {
             startup_time: std::time::Instant::now(),
             active_config: ActiveConfigSnapshot::default(),
             secrets_store: None,
+            db_auth: None,
         })
     }
 
