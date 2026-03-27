@@ -2474,8 +2474,12 @@ That's my plan."#;
         let section = reasoning.build_extensions_section_for_tools(&tool_defs);
         assert!(section.contains("connect messaging platforms so users can talk to you there"));
         assert!(section.contains("Channels are not separate send-message tools"));
-        assert!(section.contains("use normal assistant output to reply in the current conversation"));
-        assert!(section.contains("`message` tool only for proactive, background, or cross-channel outbound sends"));
+        assert!(
+            section.contains("use normal assistant output to reply in the current conversation")
+        );
+        assert!(section.contains(
+            "`message` tool only for proactive, background, or cross-channel outbound sends"
+        ));
     }
 
     #[test]
@@ -2500,7 +2504,9 @@ That's my plan."#;
 
         let section = reasoning.build_conversation_section();
         assert!(section.contains("Use normal assistant output to reply here"));
-        assert!(section.contains("only use the `message` tool for proactive, background, or cross-channel outbound sends"));
+        assert!(section.contains(
+            "only use the `message` tool for proactive, background, or cross-channel outbound sends"
+        ));
         assert!(!section.contains("omit 'target' to send here"));
     }
 

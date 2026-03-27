@@ -257,9 +257,8 @@ mod tests {
              Actual system prompt:\n{system_prompt}"
         );
         assert!(
-            system_prompt.contains(
-                "use normal assistant output to reply in the current conversation"
-            ),
+            system_prompt
+                .contains("use normal assistant output to reply in the current conversation"),
             "System prompt should route ordinary replies through normal assistant output.\n\
              Actual system prompt:\n{system_prompt}"
         );
