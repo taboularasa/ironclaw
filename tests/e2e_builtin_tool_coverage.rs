@@ -934,8 +934,10 @@ mod tests {
             .as_str()
             .expect("tool_search description should be a string");
         assert!(
-            tool_search_description.contains("Install and activate channels here"),
-            "tool_search description should describe setup/activation: {tool_search_description}"
+            tool_search_description.contains("`tool_install`")
+                && tool_search_description.contains("`tool_activate`"),
+            "tool_search description should describe setup/activation via tool_install and \
+             tool_activate: {tool_search_description}"
         );
         assert!(
             tool_search_description.contains("use the `message` tool for proactive outbound sends"),
