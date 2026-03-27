@@ -215,6 +215,14 @@ document.getElementById('token-input').addEventListener('keydown', (e) => {
   if (e.key === 'Enter') authenticate();
 });
 
+// Close SSE connections on page unload to free the browser's connection pool.
+// Without this, stale SSE connections from prior page loads linger and exhaust
+// the HTTP/1.1 per-origin connection limit (6), blocking API fetch calls.
+window.addEventListener('beforeunload', () => {
+  if (eventSource) { eventSource.close(); eventSource = null; }
+  if (logEventSource) { logEventSource.close(); logEventSource = null; }
+});
+
 // Note: main event listener registration is at the bottom of this file (search
 // "Event Listener Registration"). Do NOT add duplicate listeners here.
 
