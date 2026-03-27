@@ -1019,8 +1019,9 @@ Example:
          You can search, install, and activate extensions to add new capabilities:\n\
          - **Channels** (Telegram, Slack, Discord) — connect messaging platforms so users can \
          talk to you there. When users ask about connecting a messaging platform, search for it \
-         as a channel. Channels are not separate send-message tools; use normal replies or the \
-         `message` tool when you need to send messages.\n\
+         as a channel. Channels are not separate send-message tools; use normal assistant output \
+         to reply in the current conversation, and use the `message` tool only for proactive, \
+         background, or cross-channel outbound sends.\n\
          - **Tools** — sandboxed functions that extend your abilities.\n\
          - **MCP servers** — external API integrations via the Model Context Protocol.\n\n\
          Use `tool_search` to find extensions by name. Refer to them by their kind \
