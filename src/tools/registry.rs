@@ -16,6 +16,11 @@ use crate::skills::registry::SkillRegistry;
 use crate::tools::builder::{
     BuildSoftwareTool, BuilderConfig, LlmSoftwareBuilder, SoftwareBuilder,
 };
+#[cfg(feature = "demo")]
+use crate::tools::builtin::{
+    AboundCreateNotificationTool, AboundGetAccountInfoTool, AboundGetExchangeRateTool,
+    AboundGetForexScoreTool, AboundSendWireTool,
+};
 use crate::tools::builtin::{
     ApplyPatchTool, CancelJobTool, CreateJobTool, EchoTool, ExtensionInfoTool, HttpTool,
     JobEventsTool, JobPromptTool, JobStatusTool, JsonTool, ListDirTool, ListJobsTool,
@@ -247,6 +252,16 @@ impl ToolRegistry {
             http = http.with_credentials(Arc::clone(cr), Arc::clone(ss));
         }
         self.register_sync(Arc::new(http));
+
+        // Abound demo tools (mock APIs — only compiled with --features demo)
+        #[cfg(feature = "demo")]
+        {
+            self.register_sync(Arc::new(AboundGetAccountInfoTool));
+            self.register_sync(Arc::new(AboundGetExchangeRateTool));
+            self.register_sync(Arc::new(AboundSendWireTool));
+            self.register_sync(Arc::new(AboundCreateNotificationTool));
+            self.register_sync(Arc::new(AboundGetForexScoreTool));
+        }
 
         tracing::debug!("Registered {} built-in tools", self.count());
     }

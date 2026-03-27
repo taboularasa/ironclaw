@@ -232,6 +232,7 @@ libsql = ["dep:libsql"]
 integration = []
 html-to-markdown = ["dep:html-to-markdown-rs", "dep:readabilityrs"]
 bedrock = ["dep:aws-config", "dep:aws-sdk-bedrockruntime", "dep:aws-smithy-types"]
+demo = []
 import = ["dep:json5", "libsql"]
 
 [[test]]

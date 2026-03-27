@@ -58,7 +58,9 @@ COPY channels-src/ channels-src/
 COPY wit/ wit/
 COPY providers.json providers.json
 
-RUN cargo build --release --bin ironclaw
+COPY skills/ skills/
+
+RUN cargo build --release --features demo --bin ironclaw
 
 # Stage 5: Runtime
 FROM debian:bookworm-slim
@@ -70,6 +72,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY --from=builder /app/target/release/ironclaw /usr/local/bin/ironclaw
 COPY --from=builder /app/migrations /app/migrations
+COPY --from=builder /app/skills /app/skills
 
 # Non-root user
 RUN useradd -m -u 1000 -s /bin/bash ironclaw
@@ -78,5 +81,6 @@ USER ironclaw
 EXPOSE 3000
 
 ENV RUST_LOG=ironclaw=info
+ENV SKILLS_DIR=/app/skills
 
 ENTRYPOINT ["ironclaw"]

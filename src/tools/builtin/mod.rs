@@ -1,5 +1,7 @@
 //! Built-in tools that come with the agent.
 
+#[cfg(feature = "demo")]
+mod abound;
 mod echo;
 pub mod extension_tools;
 mod file;
@@ -17,6 +19,11 @@ pub mod skill_tools;
 mod time;
 mod tool_info;
 
+#[cfg(feature = "demo")]
+pub use abound::{
+    AboundCreateNotificationTool, AboundGetAccountInfoTool, AboundGetExchangeRateTool,
+    AboundGetForexScoreTool, AboundSendWireTool,
+};
 pub use echo::EchoTool;
 pub use extension_tools::{
     ExtensionInfoTool, ToolActivateTool, ToolAuthTool, ToolInstallTool, ToolListTool,
