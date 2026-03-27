@@ -4412,8 +4412,11 @@ function renderMissionDetail(m) {
     + '<span class="badge ' + statusClass + '">' + escapeHtml(m.status) + '</span>'
     + '</div>';
 
+  // Goal — full-width markdown block
+  html += '<div class="job-description"><h3>Goal</h3>'
+    + '<div class="job-description-body">' + renderMarkdown(m.goal) + '</div></div>';
+
   html += '<div class="job-meta-grid">'
-    + metaItem('Goal', m.goal)
     + metaItem('Cadence', m.cadence_type)
     + metaItem('Status', m.status)
     + metaItem('Threads Today', m.threads_today + ' / ' + (m.max_threads_per_day || '∞'))
@@ -4424,12 +4427,12 @@ function renderMissionDetail(m) {
 
   if (m.current_focus) {
     html += '<div class="job-description"><h3>Current Focus</h3>'
-      + '<div class="job-description-body">' + escapeHtml(m.current_focus) + '</div></div>';
+      + '<div class="job-description-body">' + renderMarkdown(m.current_focus) + '</div></div>';
   }
 
   if (m.success_criteria) {
     html += '<div class="job-description"><h3>Success Criteria</h3>'
-      + '<div class="job-description-body">' + escapeHtml(m.success_criteria) + '</div></div>';
+      + '<div class="job-description-body">' + renderMarkdown(m.success_criteria) + '</div></div>';
   }
 
   if (m.approach_history && m.approach_history.length > 0) {
@@ -4440,12 +4443,26 @@ function renderMissionDetail(m) {
     html += '</ul></div>';
   }
 
-  if (m.thread_ids && m.thread_ids.length > 0) {
-    html += '<div class="job-description"><h3>Spawned Threads</h3><ul>';
-    m.thread_ids.forEach((tid) => {
-      html += '<li><code>' + escapeHtml(tid) + '</code></li>';
+  if (m.threads && m.threads.length > 0) {
+    html += '<div class="job-description"><h3>Spawned Threads</h3>'
+      + '<table class="missions-table"><thead><tr>'
+      + '<th>Goal</th><th>Type</th><th>State</th><th>Steps</th><th>Tokens</th><th>Created</th>'
+      + '</tr></thead><tbody>';
+    m.threads.forEach((t) => {
+      var tState = t.state === 'Done' || t.state === 'Completed' ? 'completed'
+        : t.state === 'Failed' ? 'failed'
+        : t.state === 'Running' ? 'in_progress'
+        : 'pending';
+      html += '<tr class="mission-row" data-action="open-engine-thread" data-id="' + escapeHtml(t.id) + '">'
+        + '<td class="truncate">' + escapeHtml(t.goal) + '</td>'
+        + '<td>' + escapeHtml(t.thread_type) + '</td>'
+        + '<td><span class="badge ' + tState + '">' + escapeHtml(t.state) + '</span></td>'
+        + '<td>' + t.step_count + '</td>'
+        + '<td>' + t.total_tokens.toLocaleString() + '</td>'
+        + '<td>' + formatDate(t.created_at) + '</td>'
+        + '</tr>';
     });
-    html += '</ul></div>';
+    html += '</tbody></table></div>';
   }
 
   // Action buttons
@@ -4460,6 +4477,51 @@ function renderMissionDetail(m) {
   html += '</div>';
 
   detail.innerHTML = html;
+}
+
+function openEngineThread(threadId) {
+  apiFetch('/api/engine/threads/' + threadId).then((data) => {
+    var t = data.thread;
+    var detail = document.getElementById('mission-detail');
+
+    var stateClass = t.state === 'Done' || t.state === 'Completed' ? 'completed'
+      : t.state === 'Failed' ? 'failed'
+      : t.state === 'Running' ? 'in_progress'
+      : 'pending';
+
+    var html = '<div class="job-detail-header">'
+      + '<button class="btn-back" data-action="back-to-mission">&larr; Back to Mission</button>'
+      + '<h2>Thread: ' + escapeHtml(t.goal) + '</h2>'
+      + '<span class="badge ' + stateClass + '">' + escapeHtml(t.state) + '</span>'
+      + '</div>';
+
+    html += '<div class="job-meta-grid">'
+      + metaItem('Thread ID', t.id)
+      + metaItem('Type', t.thread_type)
+      + metaItem('Steps', t.step_count)
+      + metaItem('Tokens', t.total_tokens.toLocaleString())
+      + metaItem('Cost', t.total_cost_usd > 0 ? '$' + t.total_cost_usd.toFixed(4) : '-')
+      + metaItem('Max Iterations', t.max_iterations)
+      + metaItem('Created', formatDate(t.created_at))
+      + metaItem('Completed', t.completed_at ? formatDate(t.completed_at) : '-')
+      + '</div>';
+
+    if (t.messages && t.messages.length > 0) {
+      html += '<div class="job-description"><h3>Messages (' + t.messages.length + ')</h3>';
+      t.messages.forEach(function(msg, i) {
+        var roleClass = msg.role === 'Assistant' ? 'assistant' : msg.role === 'User' ? 'user' : 'system';
+        html += '<div class="thread-message thread-msg-' + roleClass + '">'
+          + '<div class="thread-msg-role">' + escapeHtml(msg.role) + '</div>'
+          + '<div class="thread-msg-content">' + renderMarkdown(msg.content) + '</div>'
+          + '</div>';
+      });
+      html += '</div>';
+    }
+
+    detail.innerHTML = html;
+  }).catch(function(err) {
+    showToast('Failed to load thread: ' + err.message, 'error');
+  });
 }
 
 function fireMission(id) {
@@ -6214,6 +6276,13 @@ document.addEventListener('click', function(e) {
     case 'resume-mission':
       e.stopPropagation();
       resumeMission(el.dataset.id);
+      break;
+    case 'open-engine-thread':
+      openEngineThread(el.dataset.id);
+      break;
+    case 'back-to-mission':
+      if (currentMissionId) openMissionDetail(currentMissionId);
+      else closeMissionDetail();
       break;
     case 'view-run-job':
       e.preventDefault();

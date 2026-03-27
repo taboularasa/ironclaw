@@ -2626,6 +2626,39 @@ body {
   padding: 16px 0;
 }
 
+.thread-message {
+  border-left: 3px solid var(--border);
+  padding: 8px 12px;
+  margin-bottom: 8px;
+  border-radius: 0 4px 4px 0;
+  font-size: var(--text-sm);
+}
+
+.thread-msg-role {
+  font-weight: 600;
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  color: var(--text-secondary);
+  margin-bottom: 4px;
+}
+
+.thread-msg-content {
+  overflow-x: auto;
+}
+
+.thread-msg-assistant {
+  border-left-color: var(--accent);
+}
+
+.thread-msg-user {
+  border-left-color: var(--success);
+}
+
+.thread-msg-system {
+  border-left-color: var(--text-secondary);
+  opacity: 0.7;
+}
+
 .truncate {
   max-width: 300px;
   white-space: nowrap;

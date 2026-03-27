@@ -1153,7 +1153,7 @@ pub struct EngineMissionDetail {
     pub max_threads_per_day: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_fire_at: Option<String>,
-    pub thread_ids: Vec<String>,
+    pub threads: Vec<EngineThreadInfo>,
 }
 
 // ── Engine query functions ───────────────────────────────────
@@ -1427,6 +1427,14 @@ pub async fn get_engine_mission(mission_id: &str) -> Result<Option<EngineMission
 
     let cadence_json = serde_json::to_value(&m.cadence).unwrap_or(serde_json::Value::Null);
 
+    // Load thread summaries for the spawned threads table
+    let mut threads = Vec::new();
+    for tid in &m.thread_history {
+        if let Ok(Some(thread)) = state.store.load_thread(*tid).await {
+            threads.push(thread_to_info(&thread));
+        }
+    }
+
     Ok(Some(EngineMissionDetail {
         info: EngineMissionInfo {
             id: m.id.to_string(),
@@ -1445,7 +1453,7 @@ pub async fn get_engine_mission(mission_id: &str) -> Result<Option<EngineMission
         threads_today: m.threads_today,
         max_threads_per_day: m.max_threads_per_day,
         next_fire_at: m.next_fire_at.map(|dt| dt.to_rfc3339()),
-        thread_ids: m.thread_history.iter().map(|t| t.to_string()).collect(),
+        threads,
     }))
 }
 
