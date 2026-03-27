@@ -1338,7 +1338,7 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
     async fn handle_text_response(
         &self,
         text: &str,
-        reason_ctx: &mut ReasoningContext,
+        _reason_ctx: &mut ReasoningContext,
     ) -> TextAction {
         // Empty text from rate-limit backoff retry — skip processing and let the
         // loop proceed to the next iteration which will re-call the LLM.
@@ -1350,20 +1350,17 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
         // meaningful for interactive chat sessions.
         let text = crate::agent::strip_suggestions(text);
 
-        // Check for explicit completion
-        if crate::util::llm_signals_completion(&text) {
-            if let Err(e) = self.worker.mark_completed().await {
-                tracing::warn!(
-                    "Failed to mark job {} as completed: {}",
-                    self.worker.job_id,
-                    e
-                );
-            }
-            return TextAction::Return(LoopOutcome::Response(text));
+        // A non-empty text response with no tool intent (already filtered
+        // by the agentic loop's nudge mechanism) is the LLM's final answer.
+        // Mark the job complete and stop the loop. Without this, the LLM
+        // restates its summary every iteration until the cap is hit.
+        if let Err(e) = self.worker.mark_completed().await {
+            tracing::warn!(
+                "Failed to mark job {} as completed: {}",
+                self.worker.job_id,
+                e
+            );
         }
-
-        // Add assistant response to context
-        reason_ctx.messages.push(ChatMessage::assistant(&text));
 
         self.worker.log_event(
             "message",
@@ -1373,7 +1370,7 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
             }),
         );
 
-        TextAction::Continue
+        TextAction::Return(LoopOutcome::Response(text))
     }
 
     async fn execute_tool_calls(
@@ -2083,6 +2080,52 @@ mod tests {
             JobState::Failed,
             "Iteration cap should transition to Failed, not Stuck"
         );
+    }
+
+    /// Regression: a text response without rigid completion phrases (e.g.
+    /// "Weekly review completed and saved to Notion") must still terminate the
+    /// agentic loop and mark the job complete, rather than continuing until
+    /// max_iterations.
+    #[tokio::test]
+    async fn test_text_response_terminates_loop_without_explicit_completion_phrase() {
+        let worker = make_worker(vec![]).await;
+        worker
+            .context_manager()
+            .update_context(worker.job_id, |ctx| {
+                ctx.transition_to(JobState::InProgress, None)
+            })
+            .await
+            .unwrap() // safety: test
+            .unwrap(); // safety: test
+
+        let (_, mut rx) = tokio::sync::mpsc::channel(1);
+        let delegate = JobDelegate {
+            worker: &worker,
+            rx: tokio::sync::Mutex::new(&mut rx),
+            consecutive_rate_limits: std::sync::atomic::AtomicUsize::new(0),
+        };
+
+        let mut reason_ctx = ReasoningContext::new();
+
+        // Text that a real LLM would produce but doesn't match llm_signals_completion
+        let action = delegate
+            .handle_text_response(
+                "Weekly review created in Notion and notification sent.",
+                &mut reason_ctx,
+            )
+            .await;
+
+        assert!(
+            matches!(action, TextAction::Return(_)),
+            "Text response should terminate the loop, got Continue"
+        ); // safety: test
+
+        let ctx = worker
+            .context_manager()
+            .get_context(worker.job_id)
+            .await
+            .unwrap(); // safety: test
+        assert_eq!(ctx.state, JobState::Completed); // safety: test
     }
 
     /// Regression test: selections_to_tool_calls must preserve tool_call_id
