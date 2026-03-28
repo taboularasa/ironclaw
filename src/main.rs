@@ -521,7 +521,7 @@ async fn async_main() -> anyhow::Result<()> {
         .is_empty()
     {
         let addr =
-            webhook_server_addr.unwrap_or_else(|| std::net::SocketAddr::from(([0, 0, 0, 0], 8080)));
+            webhook_server_addr.unwrap_or_else(|| std::net::SocketAddr::from(([127, 0, 0, 1], 8080)));
         if addr.ip().is_unspecified() {
             tracing::warn!(
                 "Webhook server is binding to {} — it will be reachable from all network interfaces. \
@@ -716,11 +716,14 @@ async fn async_main() -> anyhow::Result<()> {
         }
 
         gateway_url = Some(format!(
-            "http://{}:{}/?token={}",
+            "http://{}:{}",
             gw_config.host,
             gw_config.port,
-            gw.auth_token()
         ));
+        tracing::info!(
+            "Gateway auth token (do not share): {}",
+            gw.auth_token()
+        );
 
         tracing::debug!("Web UI: http://{}:{}/", gw_config.host, gw_config.port);
 

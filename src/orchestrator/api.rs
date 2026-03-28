@@ -100,11 +100,17 @@ impl OrchestratorApi {
         port: u16,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let router = Self::router(state);
-        let addr = if cfg!(target_os = "linux") {
-            std::net::SocketAddr::from(([0, 0, 0, 0], port))
-        } else {
-            std::net::SocketAddr::from(([127, 0, 0, 1], port))
-        };
+        let host = std::env::var("ORCHESTRATOR_HOST")
+            .ok()
+            .and_then(|h| h.parse::<std::net::IpAddr>().ok())
+            .unwrap_or_else(|| {
+                if cfg!(target_os = "linux") {
+                    std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)
+                } else {
+                    std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+                }
+            });
+        let addr = std::net::SocketAddr::new(host, port);
 
         tracing::info!("Orchestrator internal API listening on {}", addr);
 
