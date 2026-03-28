@@ -16,6 +16,7 @@ pub mod mcp;
 pub mod rate_limiter;
 pub mod redaction;
 pub mod schema_validator;
+pub mod ssrf;
 pub mod wasm;
 
 mod registry;
