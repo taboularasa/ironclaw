@@ -1,5 +1,11 @@
 //! Trust-based tool filtering (authority attenuation).
 //!
+//! **V1 only** — remove when the v1 agent (`src/agent/`) is deleted.
+//!
+//! In v2, the Python orchestrator handles skill trust via `format_skills()`
+//! and the policy engine handles tool access via capability leases. This
+//! module is only called from `src/agent/dispatcher.rs`.
+//!
 //! The core defense mechanism: the minimum trust level of any active skill
 //! determines a *tool ceiling* -- tools above the ceiling are removed from
 //! the LLM's tool list entirely. The LLM cannot be manipulated into calling

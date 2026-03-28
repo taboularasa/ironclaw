@@ -1,4 +1,10 @@
-//! Skill selection for the v2 engine.
+//! Skill selection for the v2 engine (Rust-side).
+//!
+//! **Superseded** — skill selection moved to the Python orchestrator
+//! (`orchestrator/default.py`: `select_skills()`, `score_skill()`).
+//! This module is no longer called from production code. It remains for
+//! reference and its unit tests. Remove when the Python implementation
+//! is fully validated and this Rust fallback is no longer needed.
 //!
 //! Bridges `MemoryDoc` (the engine's storage primitive) to `LoadedSkill`
 //! (the skills crate's scoring primitive), then delegates to the shared

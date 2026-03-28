@@ -6,6 +6,24 @@
 //!
 //! The `attenuation` submodule remains here because it depends on
 //! `crate::llm::ToolDefinition` which is a main-crate type.
+//!
+//! # V1 migration notes
+//!
+//! The following items in this module exist **only for the v1 agent** (`src/agent/`).
+//! Once the v1 agent is removed and all users are on ENGINE_V2, they can be deleted:
+//!
+//! - **`attenuation` module** — Trust-based tool filtering. In v2, the Python
+//!   orchestrator handles skill trust via the `format_skills()` function and
+//!   the policy engine handles tool access via capability leases.
+//! - **`register_skill_credentials()`** — Registers credential mappings from v1
+//!   `LoadedSkill` into `SharedCredentialRegistry`. In v2, credentials are declared
+//!   in the SKILL.md frontmatter and registered at migration time in `skill_migration.rs`.
+//! - **`credential_spec_to_mapping()` / `convert_credential_location()`** — Conversion
+//!   helpers used by `register_skill_credentials()`. Same lifecycle.
+//! - **This entire shim module** — Once v1 is gone, callers import from
+//!   `ironclaw_skills` directly and this file is deleted.
+//!
+//! The `ironclaw_skills` crate itself remains (types, parser, validation, v2 types).
 
 pub mod attenuation;
 

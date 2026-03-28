@@ -3,6 +3,12 @@
 //! Converts v1 `LoadedSkill` instances (from filesystem SKILL.md files) into
 //! v2 `MemoryDoc` with `DocType::Skill` and structured `V2SkillMetadata`.
 //! The migration is idempotent: skills with unchanged content_hash are skipped.
+//!
+//! **Remove after v1 migration is complete.** Once all users are on ENGINE_V2
+//! and SKILL.md files are authored directly as v2 MemoryDocs (or via the
+//! skill-extraction mission), this one-time migration code is unnecessary.
+//! The `migrate_v1_skills` / `migrate_v1_skill_list` functions and the call
+//! site in `bridge/router.rs:init_engine()` can all be deleted.
 
 use std::sync::Arc;
 
