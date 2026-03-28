@@ -597,6 +597,9 @@ pub async fn start_server(
         .layer(SetResponseHeaderLayer::if_not_present(
             header::HeaderName::from_static("content-security-policy"),
             header::HeaderValue::from_static(
+                // TODO(LOW-004): Replace 'unsafe-inline' with nonce-based inline styles
+                // to eliminate CSS injection risk. Requires per-request nonce generation
+                // and HTML template modification. See security audit LOW-004.
                 "default-src 'self'; \
                  script-src 'self' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; \
                  style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; \
