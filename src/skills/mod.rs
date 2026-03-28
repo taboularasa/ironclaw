@@ -26,6 +26,7 @@
 //! The `ironclaw_skills` crate itself remains (types, parser, validation, v2 types).
 
 pub mod attenuation;
+pub mod bundled;
 
 // Re-export everything from the extracted crate.
 pub use ironclaw_skills::*;
