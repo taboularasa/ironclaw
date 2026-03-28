@@ -48,6 +48,15 @@ impl McpProcessManager {
         let name = name.into();
         let command = command.into();
 
+        // Defense-in-depth: warn when MCP stdio servers are spawned so that
+        // operators can audit which commands are being executed. A malicious
+        // project-level .mcp.json could attempt to run arbitrary executables.
+        tracing::warn!(
+            server = %name,
+            command = %command,
+            "Spawning MCP stdio server process. Verify this command is expected."
+        );
+
         // Store config for potential restart
         self.configs.write().await.insert(
             name.clone(),
