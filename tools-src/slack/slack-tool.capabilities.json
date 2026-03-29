@@ -1,7 +1,7 @@
 {
   "version": "0.2.0",
   "wit_version": "0.3.0",
-  "description": "Send messages, list channels, read history, add reactions, and get user information in Slack.",
+  "description": "Send messages, list channels, read channel and thread history, add reactions, and get user information in Slack.",
   "http": {
     "allowlist": [
       {
@@ -40,12 +40,14 @@
         "channels:history",
         "groups:read",
         "groups:history",
+        "im:history",
+        "mpim:history",
         "reactions:write",
         "users:read"
       ],
       "use_pkce": false
     },
-    "instructions": "1. Create a Slack App at https://api.slack.com/apps\n2. Add Bot Token Scopes under OAuth & Permissions:\n   chat:write, channels:read, channels:history, groups:read,\n   groups:history, reactions:write, users:read\n3. Install the app to your workspace\n4. Copy the Bot User OAuth Token (starts with xoxb-)",
+    "instructions": "1. Create a Slack App at https://api.slack.com/apps\n2. Add Bot Token Scopes under OAuth & Permissions:\n   chat:write, channels:read, channels:history, groups:read,\n   groups:history, im:history, mpim:history, reactions:write, users:read\n3. Install the app to your workspace\n4. Copy the Bot User OAuth Token (starts with xoxb-)",
     "setup_url": "https://api.slack.com/apps",
     "token_hint": "Starts with 'xoxb-'",
     "env_var": "SLACK_BOT_TOKEN"

@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 // Re-export generated types
 use exports::near::agent::channel::{
     AgentResponse, ChannelConfig, Guest, HttpEndpointConfig, IncomingHttpRequest,
-    OutgoingHttpResponse, StatusUpdate,
+    OutgoingHttpResponse, StatusType, StatusUpdate,
 };
 use near::agent::channel_host::{self, EmittedMessage, InboundAttachment};
 
@@ -108,6 +108,9 @@ struct SlackMessageMetadata {
     /// Thread timestamp for threaded replies.
     thread_ts: Option<String>,
 
+    /// Timestamp of the in-thread placeholder message, if one was posted.
+    placeholder_ts: Option<String>,
+
     /// Original message timestamp.
     message_ts: String,
 
@@ -123,14 +126,40 @@ struct SlackPostMessageResponse {
     ts: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct SlackRepliesResponse {
+    ok: bool,
+    error: Option<String>,
+    #[serde(default)]
+    messages: Vec<SlackReplyMessage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SlackReplyMessage {
+    #[serde(default)]
+    ts: Option<String>,
+    #[serde(default)]
+    text: Option<String>,
+    #[serde(default)]
+    user: Option<String>,
+    #[serde(default)]
+    bot_id: Option<String>,
+    #[serde(default)]
+    subtype: Option<String>,
+}
+
 /// Workspace path for persisting owner_id across WASM callbacks.
 const OWNER_ID_PATH: &str = "state/owner_id";
 /// Workspace path for persisting dm_policy across WASM callbacks.
 const DM_POLICY_PATH: &str = "state/dm_policy";
 /// Workspace path for persisting allow_from (JSON array) across WASM callbacks.
 const ALLOW_FROM_PATH: &str = "state/allow_from";
+/// Workspace directory for per-message status text cache.
+const LAST_STATUS_DIR: &str = "state/last_status";
 /// Channel name for pairing store (used by pairing host APIs).
 const CHANNEL_NAME: &str = "slack";
+const THREAD_CONTEXT_MESSAGE_LIMIT: usize = 8;
+const THREAD_CONTEXT_TEXT_LIMIT: usize = 280;
 
 /// Channel configuration from capabilities file.
 #[derive(Debug, Deserialize)]
@@ -181,6 +210,13 @@ impl Guest for SlackChannel {
         let allow_from_json = serde_json::to_string(&config.allow_from.unwrap_or_default())
             .unwrap_or_else(|_| "[]".to_string());
         let _ = channel_host::workspace_write(ALLOW_FROM_PATH, &allow_from_json);
+
+        if let Err(e) = slack_set_presence("auto") {
+            channel_host::log(
+                channel_host::LogLevel::Warn,
+                &format!("Failed to set Slack presence to auto on startup: {}", e),
+            );
+        }
 
         Ok(ChannelConfig {
             display_name: "Slack".to_string(),
@@ -257,81 +293,441 @@ impl Guest for SlackChannel {
         let metadata: SlackMessageMetadata = serde_json::from_str(&response.metadata_json)
             .map_err(|e| format!("Failed to parse metadata: {}", e))?;
 
-        // Build Slack API request
-        let mut payload = serde_json::json!({
-            "channel": metadata.channel,
-            "text": response.content,
-        });
-
-        // Add thread_ts for threaded replies
-        if let Some(thread_ts) = response.thread_id.or(metadata.thread_ts) {
-            payload["thread_ts"] = serde_json::Value::String(thread_ts);
+        if let Some(ref placeholder_ts) = metadata.placeholder_ts {
+            match slack_update_message(&metadata.channel, placeholder_ts, &response.content, None) {
+                Ok(slack_response) => {
+                    clear_cached_status(placeholder_ts);
+                    channel_host::log(
+                        channel_host::LogLevel::Debug,
+                        &format!(
+                            "Updated Slack placeholder in channel {}: ts={}",
+                            metadata.channel,
+                            slack_response.ts.unwrap_or_else(|| placeholder_ts.clone())
+                        ),
+                    );
+                    return Ok(());
+                }
+                Err(e) => {
+                    channel_host::log(
+                        channel_host::LogLevel::Warn,
+                        &format!(
+                            "Failed to replace Slack placeholder {}; falling back to chat.postMessage: {}",
+                            placeholder_ts, e
+                        ),
+                    );
+                }
+            }
         }
 
-        let payload_bytes = serde_json::to_vec(&payload)
-            .map_err(|e| format!("Failed to serialize payload: {}", e))?;
-
-        // Make HTTP request to Slack API
-        // The bot token is injected by the host based on credential configuration
-        let headers = serde_json::json!({
-            "Content-Type": "application/json"
-        });
-
-        let result = channel_host::http_request(
-            "POST",
-            "https://slack.com/api/chat.postMessage",
-            &headers.to_string(),
-            Some(&payload_bytes),
+        let thread_ts = response.thread_id.or_else(|| metadata.thread_ts.clone());
+        let slack_response = slack_post_message(
+            &metadata.channel,
+            &response.content,
+            thread_ts.as_deref(),
             None,
+        )?;
+
+        if let Some(ref placeholder_ts) = metadata.placeholder_ts {
+            clear_cached_status(placeholder_ts);
+        }
+
+        channel_host::log(
+            channel_host::LogLevel::Debug,
+            &format!(
+                "Posted message to Slack channel {}: ts={}",
+                metadata.channel,
+                slack_response.ts.unwrap_or_default()
+            ),
         );
 
-        match result {
-            Ok(http_response) => {
-                if http_response.status != 200 {
-                    return Err(format!(
-                        "Slack API returned status {}",
-                        http_response.status
-                    ));
-                }
-
-                // Parse Slack response
-                let slack_response: SlackPostMessageResponse =
-                    serde_json::from_slice(&http_response.body)
-                        .map_err(|e| format!("Failed to parse Slack response: {}", e))?;
-
-                if !slack_response.ok {
-                    return Err(format!(
-                        "Slack API error: {}",
-                        slack_response
-                            .error
-                            .unwrap_or_else(|| "unknown".to_string())
-                    ));
-                }
-
-                channel_host::log(
-                    channel_host::LogLevel::Debug,
-                    &format!(
-                        "Posted message to Slack channel {}: ts={}",
-                        metadata.channel,
-                        slack_response.ts.unwrap_or_default()
-                    ),
-                );
-
-                Ok(())
-            }
-            Err(e) => Err(format!("HTTP request failed: {}", e)),
-        }
+        Ok(())
     }
 
-    fn on_status(_update: StatusUpdate) {}
+    fn on_status(update: StatusUpdate) {
+        let metadata: SlackMessageMetadata = match serde_json::from_str(&update.metadata_json) {
+            Ok(metadata) => metadata,
+            Err(e) => {
+                channel_host::log(
+                    channel_host::LogLevel::Warn,
+                    &format!("Failed to parse Slack status metadata: {}", e),
+                );
+                return;
+            }
+        };
+
+        let Some(placeholder_ts) = metadata.placeholder_ts.as_deref() else {
+            return;
+        };
+
+        let Some(status_text) = status_text_for_slack(&update) else {
+            return;
+        };
+
+        let cache_path = status_cache_path(placeholder_ts);
+        let last_status = channel_host::workspace_read(&cache_path).unwrap_or_default();
+        if last_status == status_text {
+            return;
+        }
+
+        match slack_update_message(&metadata.channel, placeholder_ts, &status_text, None) {
+            Ok(_) => {
+                let _ = channel_host::workspace_write(&cache_path, &status_text);
+            }
+            Err(e) => {
+                channel_host::log(
+                    channel_host::LogLevel::Warn,
+                    &format!(
+                        "Failed to update Slack placeholder status for {}: {}",
+                        placeholder_ts, e
+                    ),
+                );
+            }
+        }
+    }
 
     fn on_broadcast(_user_id: String, _response: AgentResponse) -> Result<(), String> {
         Err("broadcast not yet implemented for Slack channel".to_string())
     }
 
     fn on_shutdown() {
+        if let Err(e) = slack_set_presence("away") {
+            channel_host::log(
+                channel_host::LogLevel::Warn,
+                &format!("Failed to set Slack presence to away on shutdown: {}", e),
+            );
+        }
         channel_host::log(channel_host::LogLevel::Info, "Slack channel shutting down");
     }
+}
+
+fn slack_api_post(
+    endpoint: &str,
+    payload: &serde_json::Value,
+) -> Result<SlackPostMessageResponse, String> {
+    let payload_bytes =
+        serde_json::to_vec(payload).map_err(|e| format!("Failed to serialize payload: {}", e))?;
+    let headers = serde_json::json!({"Content-Type": "application/json"});
+
+    let http_response = channel_host::http_request(
+        "POST",
+        endpoint,
+        &headers.to_string(),
+        Some(&payload_bytes),
+        None,
+    )
+    .map_err(|e| format!("HTTP request failed: {}", e))?;
+
+    if http_response.status != 200 {
+        let body_str = String::from_utf8_lossy(&http_response.body);
+        return Err(format!(
+            "Slack API returned status {}: {}",
+            http_response.status, body_str
+        ));
+    }
+
+    let slack_response: SlackPostMessageResponse = serde_json::from_slice(&http_response.body)
+        .map_err(|e| format!("Failed to parse Slack response: {}", e))?;
+
+    if !slack_response.ok {
+        return Err(format!(
+            "Slack API error: {}",
+            slack_response
+                .error
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string())
+        ));
+    }
+
+    Ok(slack_response)
+}
+
+fn url_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char);
+            }
+            _ => {
+                out.push('%');
+                out.push(char::from(b"0123456789ABCDEF"[(b >> 4) as usize]));
+                out.push(char::from(b"0123456789ABCDEF"[(b & 0xf) as usize]));
+            }
+        }
+    }
+    out
+}
+
+fn slack_api_get(endpoint: &str) -> Result<Vec<u8>, String> {
+    let headers = serde_json::json!({});
+    let http_response =
+        channel_host::http_request("GET", endpoint, &headers.to_string(), None, None)
+            .map_err(|e| format!("HTTP request failed: {}", e))?;
+
+    if http_response.status != 200 {
+        let body_str = String::from_utf8_lossy(&http_response.body);
+        return Err(format!(
+            "Slack API returned status {}: {}",
+            http_response.status, body_str
+        ));
+    }
+
+    Ok(http_response.body)
+}
+
+fn slack_post_message(
+    channel_id: &str,
+    text: &str,
+    thread_ts: Option<&str>,
+    blocks: Option<serde_json::Value>,
+) -> Result<SlackPostMessageResponse, String> {
+    let mut payload = serde_json::json!({
+        "channel": channel_id,
+        "text": text,
+    });
+
+    if let Some(thread_ts) = thread_ts {
+        payload["thread_ts"] = serde_json::Value::String(thread_ts.to_string());
+    }
+
+    if let Some(blocks) = blocks {
+        payload["blocks"] = blocks;
+    }
+
+    slack_api_post("https://slack.com/api/chat.postMessage", &payload)
+}
+
+fn slack_update_message(
+    channel_id: &str,
+    ts: &str,
+    text: &str,
+    blocks: Option<serde_json::Value>,
+) -> Result<SlackPostMessageResponse, String> {
+    let mut payload = serde_json::json!({
+        "channel": channel_id,
+        "ts": ts,
+        "text": text,
+    });
+
+    if let Some(blocks) = blocks {
+        payload["blocks"] = blocks;
+    }
+
+    slack_api_post("https://slack.com/api/chat.update", &payload)
+}
+
+fn slack_set_presence(presence: &str) -> Result<(), String> {
+    let payload = serde_json::json!({
+        "presence": presence,
+    });
+
+    slack_api_post("https://slack.com/api/users.setPresence", &payload).map(|_| ())
+}
+
+fn slack_get_thread_replies(
+    channel_id: &str,
+    thread_ts: &str,
+    limit: usize,
+) -> Result<Vec<SlackReplyMessage>, String> {
+    let endpoint = format!(
+        "https://slack.com/api/conversations.replies?channel={}&ts={}&limit={}",
+        url_encode(channel_id),
+        url_encode(thread_ts),
+        limit.max(1)
+    );
+    let body = slack_api_get(&endpoint)?;
+    let response: SlackRepliesResponse = serde_json::from_slice(&body)
+        .map_err(|e| format!("Failed to parse Slack thread replies: {}", e))?;
+
+    if !response.ok {
+        return Err(format!(
+            "Slack API error: {}",
+            response.error.unwrap_or_else(|| "unknown".to_string())
+        ));
+    }
+
+    Ok(response.messages)
+}
+
+fn status_cache_path(message_ts: &str) -> String {
+    let sanitized: String = message_ts
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
+        .collect();
+    format!("{}/{}", LAST_STATUS_DIR, sanitized)
+}
+
+fn clear_cached_status(placeholder_ts: &str) {
+    let cache_path = status_cache_path(placeholder_ts);
+    let _ = channel_host::workspace_write(&cache_path, "");
+}
+
+fn format_thread_context(
+    replies: &[SlackReplyMessage],
+    current_ts: &str,
+    current_text: &str,
+) -> String {
+    let mut lines = Vec::new();
+
+    for reply in replies {
+        if reply.ts.as_deref() == Some(current_ts) {
+            continue;
+        }
+        let Some(text) = reply.text.as_deref() else {
+            continue;
+        };
+        let text = text.trim();
+        if text.is_empty() || text == current_text.trim() {
+            continue;
+        }
+
+        let author = if let Some(user) = reply.user.as_deref() {
+            user.to_string()
+        } else if reply.bot_id.is_some() || reply.subtype.as_deref() == Some("bot_message") {
+            "bot".to_string()
+        } else {
+            "unknown".to_string()
+        };
+
+        lines.push(format!(
+            "- {}: {}",
+            author,
+            truncate_thread_text(text, THREAD_CONTEXT_TEXT_LIMIT)
+        ));
+    }
+
+    if lines.is_empty() {
+        String::new()
+    } else {
+        let keep_from = lines.len().saturating_sub(THREAD_CONTEXT_MESSAGE_LIMIT);
+        format!(
+            "Recent Slack thread context:\n{}",
+            lines[keep_from..].join("\n")
+        )
+    }
+}
+
+fn truncate_thread_text(text: &str, max_chars: usize) -> String {
+    let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.chars().count() <= max_chars {
+        return normalized;
+    }
+
+    let byte_offset = normalized
+        .char_indices()
+        .nth(max_chars)
+        .map(|(index, _)| index)
+        .unwrap_or(normalized.len());
+    format!("{}...", &normalized[..byte_offset])
+}
+
+fn enrich_with_thread_context(
+    channel_id: &str,
+    actual_thread_ts: Option<&str>,
+    current_ts: &str,
+    cleaned_text: &str,
+) -> String {
+    let Some(thread_ts) = actual_thread_ts else {
+        return cleaned_text.to_string();
+    };
+
+    let replies =
+        match slack_get_thread_replies(channel_id, thread_ts, THREAD_CONTEXT_MESSAGE_LIMIT + 4) {
+            Ok(replies) => replies,
+            Err(e) => {
+                channel_host::log(
+                    channel_host::LogLevel::Warn,
+                    &format!(
+                        "Failed to fetch Slack thread context for channel {} thread {}: {}",
+                        channel_id, thread_ts, e
+                    ),
+                );
+                return cleaned_text.to_string();
+            }
+        };
+
+    let context = format_thread_context(&replies, current_ts, cleaned_text);
+    if context.is_empty() {
+        cleaned_text.to_string()
+    } else {
+        format!("{context}\n\nCurrent Slack message:\n{cleaned_text}")
+    }
+}
+
+fn status_text_for_slack(update: &StatusUpdate) -> Option<String> {
+    let message = update.message.trim();
+
+    let status_text = match update.status {
+        StatusType::Thinking => {
+            if message.is_empty() {
+                "Thinking...".to_string()
+            } else {
+                message.to_string()
+            }
+        }
+        StatusType::Done => "Composing response...".to_string(),
+        StatusType::Interrupted => {
+            if message.is_empty() {
+                "Interrupted.".to_string()
+            } else {
+                message.to_string()
+            }
+        }
+        StatusType::ToolStarted => {
+            if message.is_empty() {
+                "Using tool...".to_string()
+            } else {
+                message.to_string()
+            }
+        }
+        StatusType::ToolCompleted => {
+            if message.is_empty() {
+                "Tool finished.".to_string()
+            } else {
+                message.to_string()
+            }
+        }
+        StatusType::ToolResult => {
+            if message.is_empty() {
+                "Processing tool result...".to_string()
+            } else {
+                message.to_string()
+            }
+        }
+        StatusType::ApprovalNeeded => {
+            if message.is_empty() {
+                "Waiting for approval...".to_string()
+            } else {
+                message.to_string()
+            }
+        }
+        StatusType::Status => {
+            if message.is_empty()
+                || message.eq_ignore_ascii_case("done")
+                || message.eq_ignore_ascii_case("interrupted")
+                || message.eq_ignore_ascii_case("awaiting approval")
+                || message.eq_ignore_ascii_case("rejected")
+            {
+                return None;
+            }
+            message.to_string()
+        }
+        StatusType::JobStarted => {
+            if message.is_empty() {
+                "Starting background job...".to_string()
+            } else {
+                message.to_string()
+            }
+        }
+        StatusType::AuthRequired | StatusType::AuthCompleted => {
+            if message.is_empty() {
+                return None;
+            }
+            message.to_string()
+        }
+    };
+
+    Some(status_text)
 }
 
 /// Extract attachments from Slack file objects.
@@ -472,11 +868,19 @@ fn handle_slack_event(event: SlackEvent, team_id: Option<String>, _event_id: Opt
                 if !check_sender_permission(&user, &channel, false) {
                     return;
                 }
+                let cleaned_text = strip_bot_mention(&text);
+                let enriched_text = enrich_with_thread_context(
+                    &channel,
+                    event.thread_ts.as_deref(),
+                    &ts,
+                    &cleaned_text,
+                );
                 emit_message(
                     user,
-                    text,
+                    enriched_text,
                     channel,
-                    event.thread_ts.or(Some(ts)),
+                    event.thread_ts.or(Some(ts.clone())),
+                    ts,
                     team_id,
                     attachments,
                 );
@@ -501,11 +905,19 @@ fn handle_slack_event(event: SlackEvent, team_id: Option<String>, _event_id: Opt
                     if !check_sender_permission(&user, &channel, true) {
                         return;
                     }
+                    let cleaned_text = strip_bot_mention(&text);
+                    let enriched_text = enrich_with_thread_context(
+                        &channel,
+                        event.thread_ts.as_deref(),
+                        &ts,
+                        &cleaned_text,
+                    );
                     emit_message(
                         user,
-                        text,
+                        enriched_text,
                         channel,
-                        event.thread_ts.or(Some(ts)),
+                        event.thread_ts.or(Some(ts.clone())),
+                        ts,
                         team_id,
                         attachments,
                     );
@@ -528,14 +940,26 @@ fn emit_message(
     text: String,
     channel: String,
     thread_ts: Option<String>,
+    message_ts: String,
     team_id: Option<String>,
     attachments: Vec<InboundAttachment>,
 ) {
-    let message_ts = thread_ts.clone().unwrap_or_default();
+    let placeholder_ts =
+        match slack_post_message(&channel, "Working :gear:...", thread_ts.as_deref(), None) {
+            Ok(slack_response) => slack_response.ts,
+            Err(e) => {
+                channel_host::log(
+                    channel_host::LogLevel::Warn,
+                    &format!("Failed to post Slack placeholder message: {}", e),
+                );
+                None
+            }
+        };
 
     let metadata = SlackMessageMetadata {
         channel: channel.clone(),
         thread_ts: thread_ts.clone(),
+        placeholder_ts,
         message_ts: message_ts.clone(),
         team_id,
     };
@@ -548,13 +972,10 @@ fn emit_message(
         "{}".to_string()
     });
 
-    // Strip @ mentions of the bot from the text for cleaner messages
-    let cleaned_text = strip_bot_mention(&text);
-
     channel_host::emit_message(&EmittedMessage {
         user_id,
         user_name: None, // Could fetch from Slack API if needed
-        content: cleaned_text,
+        content: text,
         thread_id: thread_ts,
         metadata_json,
         attachments,
@@ -606,8 +1027,7 @@ fn check_sender_permission(user_id: &str, channel_id: &str, is_dm: bool) -> bool
     }
 
     // 4. Check sender (Slack events only have user ID, not username)
-    let is_allowed =
-        allowed.contains(&"*".to_string()) || allowed.contains(&user_id.to_string());
+    let is_allowed = allowed.contains(&"*".to_string()) || allowed.contains(&user_id.to_string());
 
     if is_allowed {
         return true;
@@ -625,10 +1045,7 @@ fn check_sender_permission(user_id: &str, channel_id: &str, is_dm: bool) -> bool
             Ok(result) => {
                 channel_host::log(
                     channel_host::LogLevel::Info,
-                    &format!(
-                        "Pairing request for user {}: code {}",
-                        user_id, result.code
-                    ),
+                    &format!("Pairing request for user {}: code {}", user_id, result.code),
                 );
                 if result.created {
                     let _ = send_pairing_reply(channel_id, &result.code);
@@ -647,38 +1064,16 @@ fn check_sender_permission(user_id: &str, channel_id: &str, is_dm: bool) -> bool
 
 /// Send a pairing code message via Slack chat.postMessage.
 fn send_pairing_reply(channel_id: &str, code: &str) -> Result<(), String> {
-    let payload = serde_json::json!({
-        "channel": channel_id,
-        "text": format!(
+    slack_post_message(
+        channel_id,
+        &format!(
             "To pair with this bot, run: `ironclaw pairing approve slack {}`",
             code
         ),
-    });
-
-    let payload_bytes =
-        serde_json::to_vec(&payload).map_err(|e| format!("Failed to serialize: {}", e))?;
-
-    let headers = serde_json::json!({"Content-Type": "application/json"});
-
-    let result = channel_host::http_request(
-        "POST",
-        "https://slack.com/api/chat.postMessage",
-        &headers.to_string(),
-        Some(&payload_bytes),
         None,
-    );
-
-    match result {
-        Ok(response) if response.status == 200 => Ok(()),
-        Ok(response) => {
-            let body_str = String::from_utf8_lossy(&response.body);
-            Err(format!(
-                "Slack API error: {} - {}",
-                response.status, body_str
-            ))
-        }
-        Err(e) => Err(format!("HTTP request failed: {}", e)),
-    }
+        None,
+    )
+    .map(|_| ())
 }
 
 /// Strip leading bot mention from text.

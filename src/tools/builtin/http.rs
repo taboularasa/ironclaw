@@ -1,7 +1,9 @@
 //! HTTP request tool.
 
 use std::collections::HashMap;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, SocketAddr};
+#[cfg(test)]
+use std::net::Ipv4Addr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -205,38 +207,8 @@ pub(crate) fn build_pinned_client(
         .map_err(|e| ToolError::ExternalService(format!("failed to build HTTP client: {}", e)))
 }
 
-/// Check whether an IPv4 address falls in a disallowed range (private,
-/// loopback, link-local, multicast, unspecified, or cloud metadata).
-fn is_disallowed_ipv4(v4: &Ipv4Addr) -> bool {
-    v4.is_private()
-        || v4.is_loopback()
-        || v4.is_link_local()
-        || v4.is_multicast()
-        || v4.is_unspecified()
-        || *v4 == Ipv4Addr::new(169, 254, 169, 254)
-        || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xC0) == 64)
-}
-
-fn is_disallowed_ip(ip: &IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v4) => is_disallowed_ipv4(v4),
-        IpAddr::V6(v6) => {
-            // Catch IPv4-mapped IPv6 addresses (e.g. ::ffff:169.254.169.254)
-            // that would bypass IPv4-only checks.
-            if let Some(v4) = v6.to_ipv4_mapped()
-                && is_disallowed_ipv4(&v4)
-            {
-                return true;
-            }
-
-            v6.is_loopback()
-                || v6.is_unique_local()
-                || v6.is_unicast_link_local()
-                || v6.is_multicast()
-                || v6.is_unspecified()
-        }
-    }
-}
+// SSRF IP checks are shared with MCP HTTP transport via crate::tools::ssrf.
+use crate::tools::ssrf::is_disallowed_ip;
 
 #[cfg(feature = "html-to-markdown")]
 /// Heuristic: treat as HTML if the `Content-Type` header contains `text/html`.

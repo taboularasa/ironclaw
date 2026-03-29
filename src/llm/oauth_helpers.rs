@@ -39,8 +39,16 @@ pub enum OAuthCallbackError {
 /// deployments where `127.0.0.1` is unreachable from the user's browser),
 /// then falls back to `http://{callback_host()}:{OAUTH_CALLBACK_PORT}`.
 pub fn callback_url() -> String {
-    crate::config::helpers::env_or_override("IRONCLAW_OAUTH_CALLBACK_URL")
-        .unwrap_or_else(|| format!("http://{}:{}", callback_host(), OAUTH_CALLBACK_PORT))
+    let url = crate::config::helpers::env_or_override("IRONCLAW_OAUTH_CALLBACK_URL")
+        .unwrap_or_else(|| format!("http://{}:{}", callback_host(), OAUTH_CALLBACK_PORT));
+    if url.starts_with("http://") && !url.contains("localhost") && !url.contains("127.0.0.1") {
+        tracing::warn!(
+            "OAuth callback URL uses plain HTTP on a non-localhost address: {}. \
+             Consider using SSH port forwarding or setting IRONCLAW_OAUTH_CALLBACK_URL to an HTTPS URL.",
+            url
+        );
+    }
+    url
 }
 
 /// Returns the hostname used in OAuth callback URLs.

@@ -117,6 +117,17 @@ impl WorkerRuntime {
         let credentials = self.client.fetch_credentials().await?;
         {
             let mut env_map = HashMap::new();
+
+            // Preserve selected auth env vars that the orchestrator injected
+            // into this worker container so inner shell commands can use them.
+            for key in ["GH_TOKEN", "GITHUB_TOKEN"] {
+                if let Ok(value) = std::env::var(key)
+                    && !value.trim().is_empty()
+                {
+                    env_map.insert(key.to_string(), value);
+                }
+            }
+
             for cred in &credentials {
                 env_map.insert(cred.env_var.clone(), cred.value.clone());
             }

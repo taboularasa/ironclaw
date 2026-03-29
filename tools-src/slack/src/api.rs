@@ -167,6 +167,49 @@ pub fn get_channel_history(channel: &str, limit: u32) -> Result<ChannelHistoryRe
     Ok(ChannelHistoryResult { ok: true, messages })
 }
 
+/// Get replies from a thread in a Slack channel.
+pub fn get_thread_replies(
+    channel: &str,
+    thread_ts: &str,
+    limit: u32,
+) -> Result<ChannelHistoryResult, String> {
+    let url = format!(
+        "conversations.replies?channel={}&ts={}&limit={}",
+        url_encode(channel),
+        url_encode(thread_ts),
+        limit
+    );
+
+    let response = slack_api_call("GET", &url, None)?;
+
+    let parsed: serde_json::Value =
+        serde_json::from_str(&response).map_err(|e| format!("Failed to parse response: {}", e))?;
+
+    if !parsed["ok"].as_bool().unwrap_or(false) {
+        let error = parsed["error"].as_str().unwrap_or("unknown_error");
+        return Err(format!("Slack API error: {}", error));
+    }
+
+    let messages = parsed["messages"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .map(|m| HistoryMessage {
+                    ts: m["ts"].as_str().unwrap_or("").to_string(),
+                    text: m["text"].as_str().unwrap_or("").to_string(),
+                    user: m["user"]
+                        .as_str()
+                        .or_else(|| m["bot_id"].as_str())
+                        .map(|s| s.to_string()),
+                    msg_type: m["type"].as_str().unwrap_or("message").to_string(),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Ok(ChannelHistoryResult { ok: true, messages })
+}
+
 /// Add a reaction to a message.
 pub fn post_reaction(
     channel: &str,

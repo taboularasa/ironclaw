@@ -33,6 +33,17 @@ pub enum SlackAction {
         limit: u32,
     },
 
+    /// Get replies from a Slack thread.
+    GetThreadReplies {
+        /// Channel ID (e.g., "C1234567890").
+        channel: String,
+        /// Thread timestamp for the parent message.
+        thread_ts: String,
+        /// Maximum number of messages to return (default: 20).
+        #[serde(default = "default_history_limit")]
+        limit: u32,
+    },
+
     /// Add a reaction (emoji) to a message.
     PostReaction {
         /// Channel ID containing the message.

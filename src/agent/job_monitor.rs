@@ -30,6 +30,7 @@ pub struct JobMonitorRoute {
     pub channel: String,
     pub user_id: String,
     pub thread_id: Option<String>,
+    pub response_metadata: serde_json::Value,
 }
 
 /// Spawn a background task that watches for events from a specific job and
@@ -64,7 +65,14 @@ pub fn spawn_job_monitor_with_context(
     let short_id = job_id.to_string()[..8].to_string();
 
     tokio::spawn(async move {
-        tracing::info!(job_id = %short_id, "Job monitor started successfully");
+        tracing::info!(
+            job_id = %short_id,
+            channel = %route.channel,
+            user_id = %route.user_id,
+            thread_id = ?route.thread_id,
+            has_response_metadata = !route.response_metadata.is_null(),
+            "Job monitor started successfully"
+        );
 
         loop {
             match event_rx.recv().await {
@@ -84,15 +92,42 @@ pub fn spawn_job_monitor_with_context(
                             if let Some(ref thread_id) = route.thread_id {
                                 msg = msg.with_thread(thread_id.clone());
                             }
-                            if inject_tx.send(msg).await.is_err() {
-                                tracing::debug!(
-                                    job_id = %short_id,
-                                    "Inject channel closed, stopping monitor"
-                                );
-                                break;
+                            if !route.response_metadata.is_null() {
+                                msg = msg.with_metadata(route.response_metadata.clone());
+                            }
+                            match inject_tx.send(msg).await {
+                                Ok(()) => {
+                                    tracing::debug!(
+                                        job_id = %short_id,
+                                        channel = %route.channel,
+                                        thread_id = ?route.thread_id,
+                                        "Forwarded job assistant message to agent loop"
+                                    );
+                                }
+                                Err(_) => {
+                                    tracing::debug!(
+                                        job_id = %short_id,
+                                        channel = %route.channel,
+                                        thread_id = ?route.thread_id,
+                                        "Inject channel closed, stopping monitor"
+                                    );
+                                    break;
+                                }
                             }
                         }
-                        AppEvent::JobResult { status, .. } => {
+                        AppEvent::JobResult {
+                            status,
+                            fallback_deliverable,
+                            ..
+                        } => {
+                            tracing::info!(
+                                job_id = %short_id,
+                                channel = %route.channel,
+                                thread_id = ?route.thread_id,
+                                status = %status,
+                                has_fallback_deliverable = fallback_deliverable.is_some(),
+                                "Job monitor received completion event"
+                            );
                             // Transition in-memory state so the job frees its
                             // max_jobs slot and query tools show the final state.
                             if let Some(ref cm) = context_manager {
@@ -113,19 +148,49 @@ pub fn spawn_job_monitor_with_context(
                                     .await;
                             }
 
+                            let completion_message = fallback_deliverable
+                                .and_then(json_value_to_notification_text)
+                                .filter(|text| !text.is_empty())
+                                .map(|text| format!("[Job {}] {}", short_id, text))
+                                .unwrap_or_else(|| {
+                                    format!(
+                                        "[Job {}] Container finished (status: {})",
+                                        short_id, status
+                                    )
+                                });
+
                             let mut msg = IncomingMessage::new(
                                 route.channel.clone(),
                                 route.user_id.clone(),
-                                format!(
-                                    "[Job {}] Container finished (status: {})",
-                                    short_id, status
-                                ),
+                                completion_message,
                             )
                             .into_internal();
                             if let Some(ref thread_id) = route.thread_id {
                                 msg = msg.with_thread(thread_id.clone());
                             }
-                            let _ = inject_tx.send(msg).await;
+                            if !route.response_metadata.is_null() {
+                                msg = msg.with_metadata(route.response_metadata.clone());
+                            }
+                            match inject_tx.send(msg).await {
+                                Ok(()) => {
+                                    tracing::info!(
+                                        job_id = %short_id,
+                                        channel = %route.channel,
+                                        thread_id = ?route.thread_id,
+                                        status = %status,
+                                        "Forwarded job completion message to agent loop"
+                                    );
+                                }
+                                Err(_) => {
+                                    tracing::warn!(
+                                        job_id = %short_id,
+                                        channel = %route.channel,
+                                        thread_id = ?route.thread_id,
+                                        status = %status,
+                                        "Failed to forward job completion message because inject channel is closed"
+                                    );
+                                }
+                            }
                             tracing::debug!(
                                 job_id = %short_id,
                                 status = %status,
@@ -155,6 +220,29 @@ pub fn spawn_job_monitor_with_context(
             }
         }
     })
+}
+
+fn json_value_to_notification_text(value: serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::Null => None,
+        serde_json::Value::String(text) => {
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        }
+        other => {
+            let text = other.to_string();
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        }
+    }
 }
 
 /// Lightweight watcher that only transitions ContextManager state on job
@@ -224,6 +312,7 @@ mod tests {
             channel: "cli".to_string(),
             user_id: "user-1".to_string(),
             thread_id: Some("thread-1".to_string()),
+            response_metadata: serde_json::Value::Null,
         }
     }
 
@@ -392,6 +481,46 @@ mod tests {
     fn test_into_internal_sets_flag() {
         let msg = IncomingMessage::new("monitor", "system", "test").into_internal();
         assert!(msg.is_internal);
+    }
+
+    #[tokio::test]
+    async fn test_monitor_preserves_response_metadata() {
+        let (event_tx, _) = broadcast::channel::<(Uuid, String, AppEvent)>(16);
+        let (inject_tx, mut inject_rx) = mpsc::channel::<IncomingMessage>(16);
+
+        let job_id = Uuid::new_v4();
+        let route = JobMonitorRoute {
+            channel: "slack".to_string(),
+            user_id: "user-1".to_string(),
+            thread_id: Some("thread-1".to_string()),
+            response_metadata: serde_json::json!({
+                "channel": "C123",
+                "thread_ts": "thread-1",
+                "message_ts": "123.456"
+            }),
+        };
+        let _handle = spawn_job_monitor(job_id, event_tx.subscribe(), inject_tx, route.clone());
+
+        event_tx
+            .send((
+                job_id,
+                "test-user".to_string(),
+                AppEvent::JobResult {
+                    job_id: job_id.to_string(),
+                    status: "completed".to_string(),
+                    session_id: None,
+                    fallback_deliverable: Some(serde_json::Value::String("All done".to_string())),
+                },
+            ))
+            .unwrap();
+
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(1), inject_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(msg.metadata, route.response_metadata);
+        assert!(msg.content.contains("All done"));
     }
 
     // === Regression: fire-and-forget sandbox jobs must transition out of InProgress ===

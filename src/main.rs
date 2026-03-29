@@ -9,8 +9,8 @@ use ironclaw::{
     agent::{Agent, AgentDeps},
     app::{AppBuilder, AppBuilderFlags},
     channels::{
-        ChannelManager, GatewayChannel, HttpChannel, ReplChannel, SignalChannel, WebhookServer,
-        WebhookServerConfig,
+        ChannelManager, GatewayChannel, HttpChannel, ReplChannel, SignalChannel,
+        SlackSocketChannel, WebhookServer, WebhookServerConfig,
         wasm::{WasmChannelRouter, WasmChannelRuntime},
         web::log_layer::LogBroadcaster,
     },
@@ -432,6 +432,12 @@ async fn async_main() -> anyhow::Result<()> {
     }));
 
     // Load WASM channels and register their webhook routes.
+    let mut excluded_wasm_channels = std::collections::HashSet::new();
+    let native_slack_enabled = !cli.cli_only && config.channels.slack_socket.is_some();
+    if native_slack_enabled {
+        excluded_wasm_channels.insert("slack".to_string());
+    }
+
     // Ensure the channels directory exists so the WASM runtime initializes even when
     // no channels are installed yet — hot-activation needs the runtime to be available.
     if config.channels.wasm_channels_enabled
@@ -449,6 +455,7 @@ async fn async_main() -> anyhow::Result<()> {
             &components.secrets_store,
             components.extension_manager.as_ref(),
             components.db.as_ref(),
+            &excluded_wasm_channels,
         )
         .await;
 
@@ -488,6 +495,15 @@ async fn async_main() -> anyhow::Result<()> {
         }
     }
 
+    if !cli.cli_only
+        && let Some(ref slack_config) = config.channels.slack_socket
+    {
+        let slack_channel = SlackSocketChannel::new(slack_config.clone())?;
+        channel_names.push("slack".to_string());
+        channels.add(Box::new(slack_channel)).await;
+        tracing::debug!("Native Slack Socket Mode channel enabled");
+    }
+
     // Add HTTP channel if configured and not CLI-only mode.
     let mut webhook_server_addr: Option<std::net::SocketAddr> = None;
     #[cfg(unix)]
@@ -520,8 +536,8 @@ async fn async_main() -> anyhow::Result<()> {
     let webhook_server: Option<Arc<tokio::sync::Mutex<WebhookServer>>> = if !webhook_routes
         .is_empty()
     {
-        let addr =
-            webhook_server_addr.unwrap_or_else(|| std::net::SocketAddr::from(([0, 0, 0, 0], 8080)));
+        let addr = webhook_server_addr
+            .unwrap_or_else(|| std::net::SocketAddr::from(([127, 0, 0, 1], 8080)));
         if addr.ip().is_unspecified() {
             tracing::warn!(
                 "Webhook server is binding to {} — it will be reachable from all network interfaces. \
@@ -715,12 +731,8 @@ async fn async_main() -> anyhow::Result<()> {
             }
         }
 
-        gateway_url = Some(format!(
-            "http://{}:{}/?token={}",
-            gw_config.host,
-            gw_config.port,
-            gw.auth_token()
-        ));
+        gateway_url = Some(format!("http://{}:{}", gw_config.host, gw_config.port,));
+        tracing::info!("Gateway auth token (do not share): {}", gw.auth_token());
 
         tracing::debug!("Web UI: http://{}:{}/", gw_config.host, gw_config.port);
 

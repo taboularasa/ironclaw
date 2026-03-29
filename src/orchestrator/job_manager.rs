@@ -306,10 +306,17 @@ impl ContainerJobManager {
         let docker = self.docker().await?;
 
         // Build container configuration
-        let orchestrator_host = if cfg!(target_os = "linux") {
-            "172.17.0.1"
+        // This host blocks bridge-to-host traffic on docker0, so Linux workers
+        // must use host networking and loopback instead of the default bridge
+        // gateway path.
+        let (orchestrator_host, network_mode, extra_hosts) = if cfg!(target_os = "linux") {
+            ("127.0.0.1", "host".to_string(), None)
         } else {
-            "host.docker.internal"
+            (
+                "host.docker.internal",
+                "bridge".to_string(),
+                Some(vec!["host.docker.internal:host-gateway".to_string()]),
+            )
         };
 
         let orchestrator_url = format!(
@@ -322,6 +329,17 @@ impl ContainerJobManager {
             format!("IRONCLAW_JOB_ID={}", job_id),
             format!("IRONCLAW_ORCHESTRATOR_URL={}", orchestrator_url),
         ];
+
+        // Forward GitHub auth to sandbox jobs when the host service already has
+        // it available. This keeps worker-mode jobs aligned with host CLI auth
+        // without requiring every prompt to provision credentials explicitly.
+        for key in ["GH_TOKEN", "GITHUB_TOKEN"] {
+            if let Ok(value) = std::env::var(key)
+                && !value.trim().is_empty()
+            {
+                env_vec.push(format!("{key}={value}"));
+            }
+        }
 
         // Build volume mounts (validate project_dir stays within ~/.ironclaw/projects/)
         let mut binds = Vec::new();
@@ -365,8 +383,8 @@ impl ContainerJobManager {
             binds: if binds.is_empty() { None } else { Some(binds) },
             memory: Some((memory_mb * 1024 * 1024) as i64),
             cpu_shares: Some(self.config.cpu_shares as i64),
-            network_mode: Some("bridge".to_string()),
-            extra_hosts: Some(vec!["host.docker.internal:host-gateway".to_string()]),
+            network_mode: Some(network_mode),
+            extra_hosts,
             cap_drop: Some(vec!["ALL".to_string()]),
             cap_add: Some(vec!["CHOWN".to_string()]),
             security_opt: Some(vec!["no-new-privileges:true".to_string()]),

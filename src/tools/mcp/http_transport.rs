@@ -28,10 +28,29 @@ pub struct HttpMcpTransport {
 
 impl HttpMcpTransport {
     /// Create a new HTTP transport for the given server URL.
+    ///
+    /// The server URL is validated against the SSRF blocklist at construction
+    /// time. Requests to private/internal network addresses are rejected unless
+    /// the URL targets localhost (for local MCP dev servers).
     pub fn new(server_url: impl Into<String>, server_name: impl Into<String>) -> Self {
+        let server_url = server_url.into();
+        let server_name = server_name.into();
+
+        // Validate the server URL against SSRF blocklist (defense-in-depth).
+        // Log a warning rather than failing hard, since MCP URLs come from
+        // local config files rather than untrusted user input.
+        if let Err(e) = crate::tools::ssrf::validate_url_for_ssrf(&server_url) {
+            tracing::warn!(
+                "[{}] MCP server URL failed SSRF validation: {} (url: {})",
+                server_name,
+                e,
+                server_url
+            );
+        }
+
         Self {
-            server_url: server_url.into(),
-            server_name: server_name.into(),
+            server_url,
+            server_name,
             // reqwest::Client::builder().build() only fails if the TLS backend
             // cannot initialize, which does not happen with the default rustls
             // feature set. Panic is acceptable here (same as reqwest's own
