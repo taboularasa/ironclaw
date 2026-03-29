@@ -786,12 +786,85 @@ fn monitor_route_from_ctx(ctx: &JobContext) -> Option<crate::agent::job_monitor:
         .get("notify_thread_id")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
+    let response_metadata = sanitize_monitor_response_metadata(
+        &channel,
+        thread_id.as_deref(),
+        ctx.metadata.get("notify_metadata"),
+    );
+
+    tracing::debug!(
+        channel = %channel,
+        user_id = %user_id,
+        thread_id = ?thread_id,
+        has_response_metadata = !response_metadata.is_null(),
+        "Resolved job monitor route"
+    );
 
     Some(crate::agent::job_monitor::JobMonitorRoute {
         channel,
         user_id,
         thread_id,
+        response_metadata,
     })
+}
+
+fn sanitize_monitor_response_metadata(
+    channel: &str,
+    thread_id: Option<&str>,
+    notify_metadata: Option<&serde_json::Value>,
+) -> serde_json::Value {
+    let metadata = notify_metadata.cloned().unwrap_or(serde_json::Value::Null);
+
+    if channel != "slack" {
+        return metadata;
+    }
+
+    let mut object = match metadata {
+        serde_json::Value::Object(map) => map,
+        _ => serde_json::Map::new(),
+    };
+
+    object.insert(
+        "channel".to_string(),
+        serde_json::Value::String(
+            object
+                .get("channel")
+                .and_then(|value| value.as_str())
+                .unwrap_or(channel)
+                .to_string(),
+        ),
+    );
+
+    if let Some(thread_id) = thread_id
+        && object
+            .get("thread_ts")
+            .and_then(|value| value.as_str())
+            .is_none()
+    {
+        object.insert(
+            "thread_ts".to_string(),
+            serde_json::Value::String(thread_id.to_string()),
+        );
+    }
+
+    object.remove("placeholder_ts");
+    let message_ts = object
+        .get("message_ts")
+        .and_then(|value| value.as_str())
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            object
+                .get("thread_ts")
+                .and_then(|value| value.as_str())
+                .map(ToOwned::to_owned)
+        })
+        .unwrap_or_default();
+    object.insert(
+        "message_ts".to_string(),
+        serde_json::Value::String(message_ts),
+    );
+
+    serde_json::Value::Object(object)
 }
 
 #[async_trait]
@@ -806,8 +879,15 @@ impl Tool for CreateJobTool {
              sub-agent that has shell, file read/write, list_dir, and apply_patch tools. Use this \
              whenever the user asks you to build, create, or work on something. The task \
              description should be detailed enough for the sub-agent to work independently. \
-             Set wait=false to start immediately while continuing the conversation. Set mode \
-             to 'claude_code' for complex software engineering tasks."
+             IMPORTANT: jobs are isolated containers and do NOT automatically inherit the host's \
+             existing CLI logins, keychains, SSH agents, git config, or user-scoped credentials \
+             such as GitHub auth. If the task depends on the current host environment, local \
+             checkouts, Docker state, or existing authenticated CLIs and full_access host tools \
+             are available, prefer direct host tools instead of create_job. Use create_job when \
+             you specifically want isolation, a background task, or an explicit sandbox. Set \
+             wait=false to start immediately while continuing the conversation. Set mode \
+             to 'claude_code' for complex software engineering tasks, but only when Claude auth \
+             is configured for the job environment."
         } else {
             "Create a new job or task for the agent to work on. Use this when the user wants \
              you to do something substantial that should be tracked as a separate job."

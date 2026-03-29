@@ -31,6 +31,8 @@ const TYPING_CACHE_LIMIT: usize = 512;
 const TYPING_INTERVAL: Duration = Duration::from_secs(3);
 const SOCKET_BACKOFF_MIN: Duration = Duration::from_secs(2);
 const SOCKET_BACKOFF_MAX: Duration = Duration::from_secs(60);
+const THREAD_CONTEXT_MESSAGE_LIMIT: usize = 8;
+const THREAD_CONTEXT_TEXT_LIMIT: usize = 280;
 
 type SlackSocketStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
@@ -41,6 +43,7 @@ struct SlackMessageMetadata {
     thread_ts: Option<String>,
     #[serde(default)]
     placeholder_ts: Option<String>,
+    #[serde(default)]
     message_ts: String,
     #[serde(default)]
     team_id: Option<String>,
@@ -71,6 +74,29 @@ struct SlackPostMessageResponse {
     error: Option<String>,
     #[serde(default)]
     ts: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SlackRepliesResponse {
+    ok: bool,
+    #[serde(default)]
+    error: Option<String>,
+    #[serde(default)]
+    messages: Vec<SlackReplyMessage>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct SlackReplyMessage {
+    #[serde(default)]
+    ts: Option<String>,
+    #[serde(default)]
+    text: Option<String>,
+    #[serde(default)]
+    user: Option<String>,
+    #[serde(default)]
+    bot_id: Option<String>,
+    #[serde(default)]
+    subtype: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -460,6 +486,10 @@ impl SlackSocketChannel {
             return Ok(None);
         }
 
+        let cleaned_text = strip_bot_mention(&text);
+        let enriched_text = self
+            .enrich_with_thread_context(&channel, event.thread_ts.as_deref(), &ts, &cleaned_text)
+            .await;
         let thread_ts = event.thread_ts.clone().or_else(|| Some(ts.clone()));
         let placeholder_ts = match self
             .chat_post_message(&channel, "Working :gear:...", thread_ts.as_deref(), None)
@@ -485,7 +515,8 @@ impl SlackSocketChannel {
             ChannelError::InvalidMessage(format!("failed to serialize Slack metadata: {e}"))
         })?;
 
-        let mut msg = IncomingMessage::new(CHANNEL_NAME, &user, strip_bot_mention(&text))
+        let mut msg = IncomingMessage::new(CHANNEL_NAME, &user, enriched_text)
+            .with_sender_id(user.clone())
             .with_metadata(metadata)
             .with_attachments(attachments);
 
@@ -599,6 +630,98 @@ impl SlackSocketChannel {
                 "{endpoint} response parse failed: {e}; body={body}"
             ))
         })
+    }
+
+    async fn slack_api_get<T: serde::de::DeserializeOwned>(
+        &self,
+        endpoint: &str,
+    ) -> Result<T, ChannelError> {
+        let response = self
+            .client
+            .get(endpoint)
+            .bearer_auth(&self.config.bot_token)
+            .send()
+            .await
+            .map_err(|e| ChannelError::Http(format!("{endpoint} failed: {e}")))?;
+
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .map_err(|e| ChannelError::Http(format!("{endpoint} body read failed: {e}")))?;
+
+        if !status.is_success() {
+            return Err(ChannelError::Http(format!(
+                "{endpoint} returned {status}: {body}"
+            )));
+        }
+
+        serde_json::from_str(&body).map_err(|e| {
+            ChannelError::Http(format!(
+                "{endpoint} response parse failed: {e}; body={body}"
+            ))
+        })
+    }
+
+    async fn get_thread_replies(
+        &self,
+        channel_id: &str,
+        thread_ts: &str,
+        limit: usize,
+    ) -> Result<Vec<SlackReplyMessage>, ChannelError> {
+        let endpoint = format!(
+            "https://slack.com/api/conversations.replies?channel={}&ts={}&limit={}",
+            urlencoding::encode(channel_id),
+            urlencoding::encode(thread_ts),
+            limit.max(1)
+        );
+
+        let response: SlackRepliesResponse = self.slack_api_get(&endpoint).await?;
+        if response.ok {
+            Ok(response.messages)
+        } else {
+            Err(ChannelError::Http(format!(
+                "conversations.replies failed: {}",
+                response
+                    .error
+                    .unwrap_or_else(|| "unknown Slack error".to_string())
+            )))
+        }
+    }
+
+    async fn enrich_with_thread_context(
+        &self,
+        channel_id: &str,
+        actual_thread_ts: Option<&str>,
+        current_ts: &str,
+        cleaned_text: &str,
+    ) -> String {
+        let Some(thread_ts) = actual_thread_ts else {
+            return cleaned_text.to_string();
+        };
+
+        let replies = match self
+            .get_thread_replies(channel_id, thread_ts, THREAD_CONTEXT_MESSAGE_LIMIT + 4)
+            .await
+        {
+            Ok(replies) => replies,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    channel = %channel_id,
+                    thread_ts,
+                    "Failed to fetch Slack thread context"
+                );
+                return cleaned_text.to_string();
+            }
+        };
+
+        let context = format_thread_context(&replies, current_ts, cleaned_text);
+        if context.is_empty() {
+            cleaned_text.to_string()
+        } else {
+            format!("{context}\n\nCurrent Slack message:\n{cleaned_text}")
+        }
     }
 
     async fn chat_post_message(
@@ -749,7 +872,9 @@ impl Channel for SlackSocketChannel {
                 reason: format!("Invalid Slack response metadata: {e}"),
             })?;
 
-        if let Some(ref placeholder_ts) = metadata.placeholder_ts {
+        if !msg.is_internal
+            && let Some(ref placeholder_ts) = metadata.placeholder_ts
+        {
             match self
                 .chat_update(&metadata.channel, placeholder_ts, &response.content, None)
                 .await
@@ -942,6 +1067,65 @@ fn strip_bot_mention(text: &str) -> String {
     trimmed.to_string()
 }
 
+fn format_thread_context(
+    replies: &[SlackReplyMessage],
+    current_ts: &str,
+    current_text: &str,
+) -> String {
+    let mut lines = Vec::new();
+
+    for reply in replies {
+        if reply.ts.as_deref() == Some(current_ts) {
+            continue;
+        }
+        let Some(text) = reply.text.as_deref() else {
+            continue;
+        };
+        let text = text.trim();
+        if text.is_empty() || text == current_text.trim() {
+            continue;
+        }
+
+        let author = if let Some(user) = reply.user.as_deref() {
+            user.to_string()
+        } else if reply.bot_id.is_some() || reply.subtype.as_deref() == Some("bot_message") {
+            "bot".to_string()
+        } else {
+            "unknown".to_string()
+        };
+
+        lines.push(format!(
+            "- {}: {}",
+            author,
+            truncate_slack_context_text(text, THREAD_CONTEXT_TEXT_LIMIT)
+        ));
+    }
+
+    if lines.is_empty() {
+        String::new()
+    } else {
+        let keep_from = lines.len().saturating_sub(THREAD_CONTEXT_MESSAGE_LIMIT);
+        format!(
+            "Recent Slack thread context:\n{}",
+            lines[keep_from..].join("\n")
+        )
+    }
+}
+
+fn truncate_slack_context_text(text: &str, max_chars: usize) -> String {
+    let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.chars().count() <= max_chars {
+        return normalized;
+    }
+
+    let byte_offset = normalized
+        .char_indices()
+        .nth(max_chars)
+        .map(|(index, _)| index)
+        .unwrap_or(normalized.len());
+    format!("{}...", &normalized[..byte_offset])
+}
+
 fn status_text_for_slack(status: &StatusUpdate) -> Option<String> {
     match status {
         StatusUpdate::Thinking(message) => Some(if message.trim().is_empty() {
@@ -1011,5 +1195,40 @@ fn status_text_for_slack(status: &StatusUpdate) -> Option<String> {
             }
         }
         StatusUpdate::TurnCost { .. } => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SlackReplyMessage, format_thread_context, truncate_slack_context_text};
+
+    #[test]
+    fn thread_context_skips_current_message() {
+        let replies = vec![
+            SlackReplyMessage {
+                ts: Some("1.0".to_string()),
+                text: Some("first message".to_string()),
+                user: Some("U1".to_string()),
+                bot_id: None,
+                subtype: None,
+            },
+            SlackReplyMessage {
+                ts: Some("2.0".to_string()),
+                text: Some("latest message".to_string()),
+                user: Some("U2".to_string()),
+                bot_id: None,
+                subtype: None,
+            },
+        ];
+
+        let context = format_thread_context(&replies, "2.0", "latest message");
+        assert!(context.contains("first message"));
+        assert!(!context.contains("latest message"));
+    }
+
+    #[test]
+    fn truncate_context_collapses_whitespace() {
+        let text = truncate_slack_context_text("hello\n\nworld   from   slack", 11);
+        assert_eq!(text, "hello world...");
     }
 }

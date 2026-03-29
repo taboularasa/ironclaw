@@ -14,6 +14,7 @@
 //! - `send_message`: Send a message to a channel
 //! - `list_channels`: List channels the bot has access to
 //! - `get_channel_history`: Get recent messages from a channel
+//! - `get_thread_replies`: Get replies from a Slack thread
 //! - `post_reaction`: Add an emoji reaction to a message
 //! - `get_user_info`: Get information about a Slack user
 //!
@@ -59,12 +60,12 @@ impl exports::near::agent::tool::Guest for SlackTool {
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["send_message", "list_channels", "get_channel_history", "post_reaction", "get_user_info"],
+                    "enum": ["send_message", "list_channels", "get_channel_history", "get_thread_replies", "post_reaction", "get_user_info"],
                     "description": "The Slack operation to perform"
                 },
                 "channel": {
                     "type": "string",
-                    "description": "Channel ID or name (e.g., '#general' or 'C1234567890'). Required for: send_message, get_channel_history, post_reaction"
+                    "description": "Channel ID or name (e.g., '#general' or 'C1234567890'). Required for: send_message, get_channel_history, get_thread_replies, post_reaction"
                 },
                 "text": {
                     "type": "string",
@@ -72,7 +73,7 @@ impl exports::near::agent::tool::Guest for SlackTool {
                 },
                 "thread_ts": {
                     "type": "string",
-                    "description": "Thread timestamp to reply in a thread. Used by: send_message"
+                    "description": "Thread timestamp to reply in a thread. Used by: send_message, get_thread_replies"
                 },
                 "limit": {
                     "type": "integer",
@@ -96,10 +97,10 @@ impl exports::near::agent::tool::Guest for SlackTool {
     }
 
     fn description() -> String {
-        "Slack integration tool for sending messages, listing channels, reading history, \
-         adding reactions, and getting user information. Requires a Slack bot token with \
-         appropriate scopes (chat:write, channels:read, channels:history, reactions:write, \
-         users:read)."
+        "Slack integration tool for sending messages, listing channels, reading channel and \
+         thread history, adding reactions, and getting user information. Requires a Slack bot \
+         token with appropriate scopes (chat:write, channels:read, channels:history, \
+         groups:history, im:history, mpim:history, reactions:write, users:read)."
             .to_string()
     }
 }
@@ -140,6 +141,15 @@ fn execute_inner(params: &str) -> Result<String, String> {
 
         SlackAction::GetChannelHistory { channel, limit } => {
             let result = api::get_channel_history(&channel, limit)?;
+            serde_json::to_string(&result).map_err(|e| e.to_string())?
+        }
+
+        SlackAction::GetThreadReplies {
+            channel,
+            thread_ts,
+            limit,
+        } => {
+            let result = api::get_thread_replies(&channel, &thread_ts, limit)?;
             serde_json::to_string(&result).map_err(|e| e.to_string())?
         }
 
