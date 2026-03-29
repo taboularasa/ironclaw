@@ -439,8 +439,14 @@ impl Agent {
                     .await
                     .ok();
                 if let Some(id) = thread_id {
-                    self.persist_assistant_response(id, "gateway", "default", BOOTSTRAP_GREETING)
-                        .await;
+                    self.persist_assistant_response(
+                        id,
+                        "gateway",
+                        "default",
+                        None,
+                        BOOTSTRAP_GREETING,
+                    )
+                    .await;
                 }
                 thread_id
             } else {
@@ -836,7 +842,7 @@ impl Agent {
                 sess.threads.entry(id).or_insert(thread);
             }
             self.session_manager
-                .register_thread("default", "gateway", id, session)
+                .register_thread("default", "gateway", id, None, session)
                 .await;
 
             let mut out = OutgoingResponse::text(BOOTSTRAP_GREETING.to_string());
@@ -1145,6 +1151,7 @@ impl Agent {
                         &message.user_id,
                         &message.channel,
                         target_thread_id,
+                        message.conversation_scope(),
                         Arc::clone(&session),
                     )
                     .await;

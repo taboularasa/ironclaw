@@ -391,6 +391,16 @@ impl TenantScope {
     ) -> Result<Option<serde_json::Value>, DatabaseError> {
         self.inner.get_conversation_metadata(id).await
     }
+
+    pub async fn find_conversation_id_by_thread_id(
+        &self,
+        channel: &str,
+        thread_id: &str,
+    ) -> Result<Option<Uuid>, DatabaseError> {
+        self.inner
+            .find_conversation_id_by_thread_id(channel, &self.user_id, thread_id)
+            .await
+    }
 }
 
 // ---------------------------------------------------------------------------

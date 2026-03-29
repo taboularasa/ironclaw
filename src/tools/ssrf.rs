@@ -49,9 +49,7 @@ pub fn is_disallowed_ip(ip: &IpAddr) -> bool {
 /// via [`reqwest::ClientBuilder::resolve_to_addrs`], preventing a DNS rebinding
 /// attack where a second, independent resolution (inside reqwest) returns a
 /// different -- potentially private -- IP after our validation pass.
-pub async fn validate_and_resolve_url(
-    url: &reqwest::Url,
-) -> Result<Vec<SocketAddr>, ToolError> {
+pub async fn validate_and_resolve_url(url: &reqwest::Url) -> Result<Vec<SocketAddr>, ToolError> {
     let host = url
         .host_str()
         .ok_or_else(|| ToolError::InvalidParameters("URL missing host".to_string()))?;

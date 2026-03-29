@@ -196,6 +196,17 @@ impl ConversationStore for PgBackend {
         self.store.get_conversation_metadata(id).await
     }
 
+    async fn find_conversation_id_by_thread_id(
+        &self,
+        channel: &str,
+        user_id: &str,
+        thread_id: &str,
+    ) -> Result<Option<Uuid>, DatabaseError> {
+        self.store
+            .find_conversation_id_by_thread_id(channel, user_id, thread_id)
+            .await
+    }
+
     async fn list_conversation_messages(
         &self,
         conversation_id: Uuid,

@@ -31,6 +31,7 @@ const TYPING_CACHE_LIMIT: usize = 512;
 const TYPING_INTERVAL: Duration = Duration::from_secs(3);
 const SOCKET_BACKOFF_MIN: Duration = Duration::from_secs(2);
 const SOCKET_BACKOFF_MAX: Duration = Duration::from_secs(60);
+const PRESENCE_REFRESH_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const THREAD_CONTEXT_MESSAGE_LIMIT: usize = 8;
 const THREAD_CONTEXT_TEXT_LIMIT: usize = 280;
 
@@ -330,12 +331,21 @@ impl SlackSocketChannel {
         tx: &mpsc::Sender<IncomingMessage>,
         shutdown_rx: &mut watch::Receiver<bool>,
     ) -> Result<ConnectionOutcome, ChannelError> {
+        let mut presence_refresh = tokio::time::interval(PRESENCE_REFRESH_INTERVAL);
+        presence_refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let _ = presence_refresh.tick().await;
+
         loop {
             tokio::select! {
                 _ = shutdown_rx.changed() => {
                     if *shutdown_rx.borrow() {
                         let _ = socket.close(None).await;
                         return Ok(ConnectionOutcome::Shutdown);
+                    }
+                }
+                _ = presence_refresh.tick() => {
+                    if let Err(e) = self.set_presence("auto").await {
+                        tracing::warn!(error = %e, "Failed to refresh Slack presence");
                     }
                 }
                 frame = socket.next() => {

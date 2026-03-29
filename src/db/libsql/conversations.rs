@@ -75,7 +75,9 @@ impl ConversationStore for LibSqlBackend {
             r#"
                 INSERT INTO conversations (id, channel, user_id, thread_id, started_at, last_activity)
                 VALUES (?1, ?2, ?3, ?4, ?5, ?5)
-                ON CONFLICT (id) DO UPDATE SET last_activity = excluded.last_activity
+                ON CONFLICT (id) DO UPDATE SET
+                    last_activity = excluded.last_activity,
+                    thread_id = COALESCE(conversations.thread_id, excluded.thread_id)
                 WHERE conversations.user_id = excluded.user_id
                   AND conversations.channel = excluded.channel
                 "#,
@@ -510,6 +512,41 @@ impl ConversationStore for LibSqlBackend {
             Some(row) => Ok(Some(get_json(&row, 0))),
             None => Ok(None),
         }
+    }
+
+    async fn find_conversation_id_by_thread_id(
+        &self,
+        channel: &str,
+        user_id: &str,
+        thread_id: &str,
+    ) -> Result<Option<Uuid>, DatabaseError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT id
+                FROM conversations
+                WHERE channel = ?1 AND user_id = ?2 AND thread_id = ?3
+                ORDER BY datetime(last_activity) DESC
+                LIMIT 1
+                "#,
+                params![channel, user_id, thread_id],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        else {
+            return Ok(None);
+        };
+
+        let id = get_text(&row, 0);
+        Ok(Some(Uuid::parse_str(&id).map_err(|e| {
+            DatabaseError::Query(format!("invalid conversation id '{id}': {e}"))
+        })?))
     }
 
     async fn list_conversation_messages(

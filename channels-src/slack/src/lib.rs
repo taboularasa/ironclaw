@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 // Re-export generated types
 use exports::near::agent::channel::{
     AgentResponse, ChannelConfig, Guest, HttpEndpointConfig, IncomingHttpRequest,
-    OutgoingHttpResponse, StatusType, StatusUpdate,
+    OutgoingHttpResponse, PollConfig, StatusType, StatusUpdate,
 };
 use near::agent::channel_host::{self, EmittedMessage, InboundAttachment};
 
@@ -160,6 +160,7 @@ const LAST_STATUS_DIR: &str = "state/last_status";
 const CHANNEL_NAME: &str = "slack";
 const THREAD_CONTEXT_MESSAGE_LIMIT: usize = 8;
 const THREAD_CONTEXT_TEXT_LIMIT: usize = 280;
+const PRESENCE_HEARTBEAT_INTERVAL_MS: u32 = 300_000;
 
 /// Channel configuration from capabilities file.
 #[derive(Debug, Deserialize)]
@@ -225,7 +226,10 @@ impl Guest for SlackChannel {
                 methods: vec!["POST".to_string()],
                 require_secret: true,
             }],
-            poll: None,
+            poll: Some(PollConfig {
+                interval_ms: PRESENCE_HEARTBEAT_INTERVAL_MS,
+                enabled: true,
+            }),
         })
     }
 
@@ -285,7 +289,12 @@ impl Guest for SlackChannel {
     }
 
     fn on_poll() {
-        // Slack uses webhooks, no polling needed
+        if let Err(e) = slack_set_presence("auto") {
+            channel_host::log(
+                channel_host::LogLevel::Warn,
+                &format!("Failed to refresh Slack presence: {}", e),
+            );
+        }
     }
 
     fn on_respond(response: AgentResponse) -> Result<(), String> {

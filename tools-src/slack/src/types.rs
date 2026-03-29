@@ -54,6 +54,12 @@ pub enum SlackAction {
         emoji: String,
     },
 
+    /// Update the bot presence indicator.
+    SetPresence {
+        /// Presence value accepted by Slack (for example "auto" or "away").
+        presence: String,
+    },
+
     /// Get information about a user.
     GetUserInfo {
         /// User ID (e.g., "U1234567890").
@@ -130,6 +136,13 @@ pub struct HistoryMessage {
 #[derive(Debug, Serialize)]
 pub struct PostReactionResult {
     pub ok: bool,
+}
+
+/// Result from set_presence.
+#[derive(Debug, Serialize)]
+pub struct SetPresenceResult {
+    pub ok: bool,
+    pub presence: String,
 }
 
 /// User information.

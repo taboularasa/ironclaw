@@ -31,6 +31,27 @@ pub fn normalize_lexical(path: &Path) -> PathBuf {
     components.iter().collect()
 }
 
+/// Expand a leading `~` to the current user's home directory.
+///
+/// Only bare `~` and `~/...` are expanded. Other forms like `~otheruser/...`
+/// are left unchanged.
+fn expand_tilde(path_str: &str) -> String {
+    if !(path_str == "~" || path_str.starts_with("~/")) {
+        return path_str.to_string();
+    }
+
+    let Some(home) = dirs::home_dir() else {
+        return path_str.to_string();
+    };
+
+    let home = home.to_string_lossy();
+    if path_str == "~" {
+        home.into_owned()
+    } else {
+        format!("{home}{}", &path_str[1..])
+    }
+}
+
 /// Validate that a path is safe (no traversal attacks).
 ///
 /// For sandboxed paths (base_dir is set), we normalize the joined path lexically
@@ -46,17 +67,19 @@ pub fn normalize_lexical(path: &Path) -> PathBuf {
 /// * `Ok(resolved_path)` - The canonicalized, validated path
 /// * `Err(ToolError)` - If path escapes sandbox or is invalid
 pub fn validate_path(path_str: &str, base_dir: Option<&Path>) -> Result<PathBuf, ToolError> {
+    let expanded = expand_tilde(path_str);
+
     // First pass: reject null bytes and URL-encoded traversal
     // Note: We don't block `..` here because validate_path handles it by
     // normalizing lexically and checking sandbox containment
-    if !is_path_safe_minimal(path_str) {
+    if !is_path_safe_minimal(&expanded) {
         return Err(ToolError::NotAuthorized(format!(
             "Path contains forbidden characters or sequences: {}",
             path_str
         )));
     }
 
-    let path = PathBuf::from(path_str);
+    let path = PathBuf::from(&expanded);
 
     // Resolve to absolute path
     let resolved = if path.is_absolute() {
@@ -171,6 +194,35 @@ fn is_path_safe_minimal(path: &str) -> bool {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn test_expand_tilde_home() {
+        let expanded = expand_tilde("~/documents/file.txt");
+        assert!(!expanded.starts_with('~'));
+        assert!(expanded.ends_with("/documents/file.txt"));
+    }
+
+    #[test]
+    fn test_expand_tilde_bare() {
+        let expanded = expand_tilde("~");
+        assert!(!expanded.contains('~'));
+    }
+
+    #[test]
+    fn test_expand_tilde_no_op_absolute() {
+        assert_eq!(expand_tilde("/tmp/file.txt"), "/tmp/file.txt");
+    }
+
+    #[test]
+    fn test_expand_tilde_no_op_relative() {
+        assert_eq!(expand_tilde("foo/bar.txt"), "foo/bar.txt");
+    }
+
+    #[test]
+    fn test_expand_tilde_no_expand_other_users() {
+        let expanded = expand_tilde("~otheruser/file.txt");
+        assert_eq!(expanded, "~otheruser/file.txt");
+    }
 
     #[test]
     fn test_is_path_safe_basic_allows_normal_paths() {

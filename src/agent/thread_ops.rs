@@ -46,10 +46,33 @@ impl Agent {
         message: &IncomingMessage,
         external_thread_id: &str,
     ) -> Option<String> {
-        // Only hydrate UUID-shaped thread IDs (web gateway uses UUIDs)
-        let thread_uuid = match Uuid::parse_str(external_thread_id) {
-            Ok(id) => id,
-            Err(_) => return None,
+        let (thread_uuid, requires_ownership_check) = match Uuid::parse_str(external_thread_id) {
+            Ok(id) => (id, true),
+            Err(_) => {
+                let store = self.store()?;
+                let thread_uuid = match store
+                    .find_conversation_id_by_thread_id(
+                        &message.channel,
+                        &message.user_id,
+                        external_thread_id,
+                    )
+                    .await
+                {
+                    Ok(Some(id)) => id,
+                    Ok(None) => return None,
+                    Err(e) => {
+                        tracing::warn!(
+                            user = %message.user_id,
+                            channel = %message.channel,
+                            external_thread_id,
+                            "Failed to look up conversation by external thread id: {}",
+                            e
+                        );
+                        return None;
+                    }
+                };
+                (thread_uuid, false)
+            }
         };
 
         // Check if already in memory
@@ -69,32 +92,17 @@ impl Agent {
         let msg_count;
 
         if let Some(store) = self.store() {
-            // Never hydrate history from a conversation UUID that isn't owned
-            // by the current authenticated user.
-            let owned = match store
-                .conversation_belongs_to_user(thread_uuid, &message.user_id)
-                .await
-            {
-                Ok(v) => v,
-                Err(e) => {
-                    tracing::warn!(
-                        "Failed to verify conversation ownership for hydration {}: {}",
-                        thread_uuid,
-                        e
-                    );
-                    if requires_preexisting_uuid_thread(&message.channel) {
-                        return Some(FORGED_THREAD_ID_ERROR.to_string());
-                    }
-                    return None;
-                }
-            };
-            if !owned {
-                let exists = match store.get_conversation_metadata(thread_uuid).await {
-                    Ok(Some(_)) => true,
-                    Ok(None) => false,
+            if requires_ownership_check {
+                // Never hydrate history from a conversation UUID that isn't owned
+                // by the current authenticated user.
+                let owned = match store
+                    .conversation_belongs_to_user(thread_uuid, &message.user_id)
+                    .await
+                {
+                    Ok(v) => v,
                     Err(e) => {
                         tracing::warn!(
-                            "Failed to inspect conversation metadata for hydration {}: {}",
+                            "Failed to verify conversation ownership for hydration {}: {}",
                             thread_uuid,
                             e
                         );
@@ -104,25 +112,42 @@ impl Agent {
                         return None;
                     }
                 };
+                if !owned {
+                    let exists = match store.get_conversation_metadata(thread_uuid).await {
+                        Ok(Some(_)) => true,
+                        Ok(None) => false,
+                        Err(e) => {
+                            tracing::warn!(
+                                "Failed to inspect conversation metadata for hydration {}: {}",
+                                thread_uuid,
+                                e
+                            );
+                            if requires_preexisting_uuid_thread(&message.channel) {
+                                return Some(FORGED_THREAD_ID_ERROR.to_string());
+                            }
+                            return None;
+                        }
+                    };
 
-                if requires_preexisting_uuid_thread(&message.channel) {
+                    if requires_preexisting_uuid_thread(&message.channel) {
+                        tracing::warn!(
+                            user = %message.user_id,
+                            channel = %message.channel,
+                            thread_id = %thread_uuid,
+                            exists,
+                            "Rejected message for unavailable thread id"
+                        );
+                        return Some(FORGED_THREAD_ID_ERROR.to_string());
+                    }
+
                     tracing::warn!(
                         user = %message.user_id,
-                        channel = %message.channel,
                         thread_id = %thread_uuid,
                         exists,
-                        "Rejected message for unavailable thread id"
+                        "Skipped hydration for thread id not owned by sender"
                     );
-                    return Some(FORGED_THREAD_ID_ERROR.to_string());
+                    return None;
                 }
-
-                tracing::warn!(
-                    user = %message.user_id,
-                    thread_id = %thread_uuid,
-                    exists,
-                    "Skipped hydration for thread id not owned by sender"
-                );
-                return None;
             }
 
             let db_messages = store
@@ -159,6 +184,7 @@ impl Agent {
                 &message.user_id,
                 &message.channel,
                 thread_uuid,
+                Some(external_thread_id),
                 Arc::clone(&session),
             )
             .await;
@@ -441,6 +467,7 @@ impl Agent {
             thread_id,
             &message.channel,
             &message.user_id,
+            message.conversation_scope(),
             effective_content,
         )
         .await;
@@ -533,6 +560,7 @@ impl Agent {
                     thread_id,
                     &message.channel,
                     &message.user_id,
+                    message.conversation_scope(),
                     turn_number,
                     &tool_calls,
                     narrative.as_deref(),
@@ -542,6 +570,7 @@ impl Agent {
                     thread_id,
                     &message.channel,
                     &message.user_id,
+                    message.conversation_scope(),
                     &response,
                 )
                 .await;
@@ -634,9 +663,10 @@ impl Agent {
         thread_id: Uuid,
         channel: &str,
         user_id: &str,
+        external_thread_id: Option<&str>,
     ) -> bool {
         match store
-            .ensure_conversation(thread_id, channel, user_id, None)
+            .ensure_conversation(thread_id, channel, user_id, external_thread_id)
             .await
         {
             Ok(true) => true,
@@ -669,6 +699,7 @@ impl Agent {
         thread_id: Uuid,
         channel: &str,
         user_id: &str,
+        external_thread_id: Option<&str>,
         user_input: &str,
     ) {
         let store = match self.store() {
@@ -677,7 +708,7 @@ impl Agent {
         };
 
         if !self
-            .ensure_writable_conversation(&store, thread_id, channel, user_id)
+            .ensure_writable_conversation(&store, thread_id, channel, user_id, external_thread_id)
             .await
         {
             return;
@@ -701,6 +732,7 @@ impl Agent {
         thread_id: Uuid,
         channel: &str,
         user_id: &str,
+        external_thread_id: Option<&str>,
         response: &str,
     ) {
         let store = match self.store() {
@@ -709,7 +741,7 @@ impl Agent {
         };
 
         if !self
-            .ensure_writable_conversation(&store, thread_id, channel, user_id)
+            .ensure_writable_conversation(&store, thread_id, channel, user_id, external_thread_id)
             .await
         {
             return;
@@ -735,6 +767,7 @@ impl Agent {
         thread_id: Uuid,
         channel: &str,
         user_id: &str,
+        external_thread_id: Option<&str>,
         turn_number: usize,
         tool_calls: &[crate::agent::session::TurnToolCall],
         narrative: Option<&str>,
@@ -804,7 +837,7 @@ impl Agent {
         };
 
         if !self
-            .ensure_writable_conversation(&store, thread_id, channel, user_id)
+            .ensure_writable_conversation(&store, thread_id, channel, user_id, external_thread_id)
             .await
         {
             return;
@@ -1505,6 +1538,7 @@ impl Agent {
                         thread_id,
                         &message.channel,
                         &message.user_id,
+                        message.conversation_scope(),
                         turn_number,
                         &tool_calls,
                         narrative.as_deref(),
@@ -1514,6 +1548,7 @@ impl Agent {
                         thread_id,
                         &message.channel,
                         &message.user_id,
+                        message.conversation_scope(),
                         &response,
                     )
                     .await;
@@ -1591,6 +1626,7 @@ impl Agent {
                         thread_id,
                         &message.channel,
                         &message.user_id,
+                        message.conversation_scope(),
                         &rejection,
                     )
                     .await;
@@ -1635,6 +1671,7 @@ impl Agent {
                     thread_id,
                     &message.channel,
                     &message.user_id,
+                    message.conversation_scope(),
                     &instructions,
                 )
                 .await;

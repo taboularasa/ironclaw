@@ -41,7 +41,8 @@
     },
     "channel": {
       "allowed_paths": ["/webhook/slack"],
-      "allow_polling": false,
+      "allow_polling": true,
+      "min_poll_interval_ms": 300000,
       "workspace_prefix": "channels/slack/",
       "emit_rate_limit": {
         "messages_per_minute": 100,

@@ -1589,7 +1589,8 @@ impl Store {
             INSERT INTO conversations (id, channel, user_id, thread_id)
             VALUES ($1, $2, $3, $4)
             ON CONFLICT (id) DO UPDATE
-            SET last_activity = NOW()
+            SET last_activity = NOW(),
+                thread_id = COALESCE(conversations.thread_id, EXCLUDED.thread_id)
             WHERE conversations.user_id = EXCLUDED.user_id
               AND conversations.channel = EXCLUDED.channel
             "#,
@@ -1977,6 +1978,29 @@ impl Store {
             .query_opt("SELECT metadata FROM conversations WHERE id = $1", &[&id])
             .await?;
         Ok(row.map(|r| r.get::<_, serde_json::Value>(0)))
+    }
+
+    /// Find a conversation by external thread identifier for a channel/user pair.
+    pub async fn find_conversation_id_by_thread_id(
+        &self,
+        channel: &str,
+        user_id: &str,
+        thread_id: &str,
+    ) -> Result<Option<Uuid>, DatabaseError> {
+        let conn = self.conn().await?;
+        let row = conn
+            .query_opt(
+                r#"
+                SELECT id
+                FROM conversations
+                WHERE channel = $1 AND user_id = $2 AND thread_id = $3
+                ORDER BY last_activity DESC
+                LIMIT 1
+                "#,
+                &[&channel, &user_id, &thread_id],
+            )
+            .await?;
+        Ok(row.map(|r| r.get::<_, Uuid>(0)))
     }
 
     /// Load all messages for a conversation, ordered chronologically.

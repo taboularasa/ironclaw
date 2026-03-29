@@ -1,9 +1,9 @@
 //! HTTP request tool.
 
 use std::collections::HashMap;
-use std::net::{IpAddr, SocketAddr};
 #[cfg(test)]
 use std::net::Ipv4Addr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 

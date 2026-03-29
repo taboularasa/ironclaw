@@ -385,6 +385,12 @@ pub trait ConversationStore: Send + Sync {
         &self,
         id: Uuid,
     ) -> Result<Option<serde_json::Value>, DatabaseError>;
+    async fn find_conversation_id_by_thread_id(
+        &self,
+        channel: &str,
+        user_id: &str,
+        thread_id: &str,
+    ) -> Result<Option<Uuid>, DatabaseError>;
     async fn list_conversation_messages(
         &self,
         conversation_id: Uuid,

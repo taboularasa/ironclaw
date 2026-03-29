@@ -16,6 +16,7 @@
 //! - `get_channel_history`: Get recent messages from a channel
 //! - `get_thread_replies`: Get replies from a Slack thread
 //! - `post_reaction`: Add an emoji reaction to a message
+//! - `set_presence`: Update the bot presence indicator
 //! - `get_user_info`: Get information about a Slack user
 //!
 //! # Example Usage
@@ -60,7 +61,7 @@ impl exports::near::agent::tool::Guest for SlackTool {
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["send_message", "list_channels", "get_channel_history", "get_thread_replies", "post_reaction", "get_user_info"],
+                    "enum": ["send_message", "list_channels", "get_channel_history", "get_thread_replies", "post_reaction", "set_presence", "get_user_info"],
                     "description": "The Slack operation to perform"
                 },
                 "channel": {
@@ -87,6 +88,10 @@ impl exports::near::agent::tool::Guest for SlackTool {
                     "type": "string",
                     "description": "Emoji name without colons (e.g., 'thumbsup'). Required for: post_reaction"
                 },
+                "presence": {
+                    "type": "string",
+                    "description": "Presence value accepted by Slack. Required for: set_presence"
+                },
                 "user_id": {
                     "type": "string",
                     "description": "User ID (e.g., 'U1234567890'). Required for: get_user_info"
@@ -98,9 +103,9 @@ impl exports::near::agent::tool::Guest for SlackTool {
 
     fn description() -> String {
         "Slack integration tool for sending messages, listing channels, reading channel and \
-         thread history, adding reactions, and getting user information. Requires a Slack bot \
+         thread history, adding reactions, setting presence, and getting user information. Requires a Slack bot \
          token with appropriate scopes (chat:write, channels:read, channels:history, \
-         groups:history, im:history, mpim:history, reactions:write, users:read)."
+         groups:history, im:history, mpim:history, reactions:write, users:read, users:write)."
             .to_string()
     }
 }
@@ -159,6 +164,11 @@ fn execute_inner(params: &str) -> Result<String, String> {
             emoji,
         } => {
             let result = api::post_reaction(&channel, &timestamp, &emoji)?;
+            serde_json::to_string(&result).map_err(|e| e.to_string())?
+        }
+
+        SlackAction::SetPresence { presence } => {
+            let result = api::set_presence(&presence)?;
             serde_json::to_string(&result).map_err(|e| e.to_string())?
         }
 

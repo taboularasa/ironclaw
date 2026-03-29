@@ -829,6 +829,55 @@ mod tests {
 
     #[cfg(feature = "libsql")]
     #[tokio::test]
+    async fn test_find_conversation_by_external_thread_id() {
+        let harness = TestHarnessBuilder::new().build().await;
+        let db = &harness.db;
+
+        let conv_id = uuid::Uuid::new_v4();
+
+        assert!(
+            db.ensure_conversation(conv_id, "slack", "alice", Some("1711700000.000100"))
+                .await
+                .expect("ensure conversation with external thread id")
+        );
+
+        let found = db
+            .find_conversation_id_by_thread_id("slack", "alice", "1711700000.000100")
+            .await
+            .expect("find conversation by external thread id");
+
+        assert_eq!(found, Some(conv_id));
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_ensure_conversation_backfills_missing_thread_id() {
+        let harness = TestHarnessBuilder::new().build().await;
+        let db = &harness.db;
+
+        let conv_id = uuid::Uuid::new_v4();
+
+        assert!(
+            db.ensure_conversation(conv_id, "slack", "alice", None)
+                .await
+                .expect("initial ensure")
+        );
+        assert!(
+            db.ensure_conversation(conv_id, "slack", "alice", Some("1711700000.000200"))
+                .await
+                .expect("backfill ensure")
+        );
+
+        let found = db
+            .find_conversation_id_by_thread_id("slack", "alice", "1711700000.000200")
+            .await
+            .expect("lookup backfilled thread id");
+
+        assert_eq!(found, Some(conv_id));
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
     async fn test_paginated_messages() {
         let harness = TestHarnessBuilder::new().build().await;
         let db = &harness.db;

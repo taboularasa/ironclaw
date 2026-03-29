@@ -227,12 +227,17 @@ impl SessionManager {
         user_id: &str,
         channel: &str,
         thread_id: Uuid,
+        external_thread_id: Option<&str>,
         session: Arc<Mutex<Session>>,
     ) {
         let key = ThreadKey {
             user_id: user_id.to_string(),
             channel: channel.to_string(),
-            external_thread_id: Some(thread_id.to_string()),
+            external_thread_id: Some(
+                external_thread_id
+                    .map(str::to_string)
+                    .unwrap_or_else(|| thread_id.to_string()),
+            ),
         };
 
         {
@@ -483,7 +488,13 @@ mod tests {
 
         // Register the thread
         manager
-            .register_thread("user-hydrate", "gateway", thread_id, Arc::clone(&session))
+            .register_thread(
+                "user-hydrate",
+                "gateway",
+                thread_id,
+                None,
+                Arc::clone(&session),
+            )
             .await;
 
         // resolve_thread should find it (using the UUID as external_thread_id)
@@ -495,6 +506,37 @@ mod tests {
         // Should be the same session object
         let sess = resolved_session.lock().await;
         assert!(sess.threads.contains_key(&thread_id));
+    }
+
+    #[tokio::test]
+    async fn test_register_thread_with_custom_external_id() {
+        use crate::agent::session::{Session, Thread};
+
+        let manager = SessionManager::new();
+        let thread_id = Uuid::new_v4();
+        let session = Arc::new(Mutex::new(Session::new("user-slack")));
+
+        {
+            let mut sess = session.lock().await;
+            let thread = Thread::with_id(thread_id, sess.id);
+            sess.threads.insert(thread_id, thread);
+            sess.active_thread = Some(thread_id);
+        }
+
+        manager
+            .register_thread(
+                "user-slack",
+                "slack",
+                thread_id,
+                Some("1711700000.000300"),
+                Arc::clone(&session),
+            )
+            .await;
+
+        let (_, resolved_tid) = manager
+            .resolve_thread("user-slack", "slack", Some("1711700000.000300"))
+            .await;
+        assert_eq!(resolved_tid, thread_id);
     }
 
     #[tokio::test]
@@ -606,7 +648,13 @@ mod tests {
 
         // Register it
         manager
-            .register_thread("user-web", "gateway", known_uuid, Arc::clone(&session))
+            .register_thread(
+                "user-web",
+                "gateway",
+                known_uuid,
+                None,
+                Arc::clone(&session),
+            )
             .await;
 
         // resolve_thread with UUID as external_thread_id MUST return the same UUID,
@@ -633,10 +681,10 @@ mod tests {
 
         // Register twice
         manager
-            .register_thread("user-idem", "gateway", tid, Arc::clone(&session))
+            .register_thread("user-idem", "gateway", tid, None, Arc::clone(&session))
             .await;
         manager
-            .register_thread("user-idem", "gateway", tid, Arc::clone(&session))
+            .register_thread("user-idem", "gateway", tid, None, Arc::clone(&session))
             .await;
 
         // Should still resolve to the same thread
@@ -661,7 +709,7 @@ mod tests {
         }
 
         manager
-            .register_thread("user-undo", "gateway", tid, Arc::clone(&session))
+            .register_thread("user-undo", "gateway", tid, None, Arc::clone(&session))
             .await;
 
         // Undo manager should exist for the registered thread
@@ -691,7 +739,7 @@ mod tests {
         }
 
         manager
-            .register_thread("user-new", "gateway", tid, Arc::clone(&session))
+            .register_thread("user-new", "gateway", tid, None, Arc::clone(&session))
             .await;
 
         // Now the session should be tracked
@@ -794,7 +842,7 @@ mod tests {
 
         // Register on "gateway" channel
         manager
-            .register_thread("user-cross", "gateway", tid, Arc::clone(&session))
+            .register_thread("user-cross", "gateway", tid, None, Arc::clone(&session))
             .await;
 
         // Resolve on a different channel with the same UUID string should NOT
@@ -820,10 +868,10 @@ mod tests {
         }
 
         manager
-            .register_thread("user-cross", "http", tid, Arc::clone(&session))
+            .register_thread("user-cross", "http", tid, None, Arc::clone(&session))
             .await;
         manager
-            .register_thread("user-cross", "gateway", tid, Arc::clone(&session))
+            .register_thread("user-cross", "gateway", tid, None, Arc::clone(&session))
             .await;
 
         let (_, resolved) = manager

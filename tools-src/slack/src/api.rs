@@ -239,6 +239,29 @@ pub fn post_reaction(
     Ok(PostReactionResult { ok: true })
 }
 
+/// Set the bot presence indicator.
+pub fn set_presence(presence: &str) -> Result<SetPresenceResult, String> {
+    let payload = serde_json::json!({
+        "presence": presence,
+    });
+
+    let body = serde_json::to_string(&payload).map_err(|e| e.to_string())?;
+    let response = slack_api_call("POST", "users.setPresence", Some(&body))?;
+
+    let parsed: serde_json::Value =
+        serde_json::from_str(&response).map_err(|e| format!("Failed to parse response: {}", e))?;
+
+    if !parsed["ok"].as_bool().unwrap_or(false) {
+        let error = parsed["error"].as_str().unwrap_or("unknown_error");
+        return Err(format!("Slack API error: {}", error));
+    }
+
+    Ok(SetPresenceResult {
+        ok: true,
+        presence: presence.to_string(),
+    })
+}
+
 /// Get information about a user.
 pub fn get_user_info(user_id: &str) -> Result<GetUserInfoResult, String> {
     let url = format!("users.info?user={}", url_encode(user_id));

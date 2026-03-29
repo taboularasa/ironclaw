@@ -671,6 +671,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_write_file_expands_tilde_home() {
+        let home = dirs::home_dir().expect("home directory");
+        let temp = tempfile::tempdir_in(&home).unwrap();
+        let relative_dir = temp.path().strip_prefix(&home).unwrap();
+        let tilde_path = format!("~/{}/tilde_file.txt", relative_dir.display());
+        let expected_path = temp.path().join("tilde_file.txt");
+
+        let tool = WriteFileTool::new();
+        let ctx = JobContext::default();
+
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "path": tilde_path,
+                    "content": "tilde works"
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        assert!(result.result.get("success").unwrap().as_bool().unwrap());
+        assert_eq!(
+            std::fs::read_to_string(&expected_path).unwrap(),
+            "tilde works"
+        );
+    }
+
+    #[tokio::test]
     async fn test_apply_patch() {
         let dir = TempDir::new().unwrap();
         let file_path = dir.path().join("code.rs");
