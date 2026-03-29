@@ -207,6 +207,10 @@ impl Tool for MessageTool {
                     "type": "string",
                     "description": "Recipient: E.164 phone, group ID, chat ID (defaults to current sender/group if omitted)"
                 },
+                "thread_ts": {
+                    "type": "string",
+                    "description": "Thread timestamp to reply in (Slack only). Use the thread_ts from Current Conversation context to reply in the same thread."
+                },
                 "attachments": {
                     "type": "array",
                     "items": {"type": "string"},
@@ -320,6 +324,9 @@ impl Tool for MessageTool {
         }
 
         let mut response = OutgoingResponse::text(content);
+        if let Some(thread_ts) = params.get("thread_ts").and_then(|v| v.as_str()) {
+            response = response.in_thread(thread_ts.to_string());
+        }
         if !attachments.is_empty() {
             response = response.with_attachments(attachments);
         }
@@ -463,6 +470,7 @@ mod tests {
         assert!(params.get("content").is_some());
         assert!(params.get("channel").is_some());
         assert!(params.get("target").is_some());
+        assert!(params.get("thread_ts").is_some());
 
         // Only content is required - channel and target can be inferred from conversation context
         let required = schema.get("required").unwrap().as_array().unwrap();
@@ -592,6 +600,41 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("channel") || err.contains("Channel"));
+    }
+
+    #[tokio::test]
+    async fn message_tool_passes_explicit_thread_ts_to_broadcast() {
+        let (tool, _gateway_captures, telegram_captures) =
+            message_tool_with_recording_channels().await;
+
+        let ctx = crate::context::JobContext::new("test", "test description");
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "content": "threaded reply",
+                    "channel": "telegram",
+                    "target": "@username",
+                    "thread_ts": "1774765635.494569"
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            result
+                .result
+                .as_str()
+                .is_some_and(|value| value.contains("Sent message"))
+        );
+
+        let captures = telegram_captures.lock().await;
+        assert_eq!(captures.len(), 1);
+        assert_eq!(captures[0].0, "@username");
+        assert_eq!(
+            captures[0].1.thread_id.as_deref(),
+            Some("1774765635.494569")
+        );
     }
 
     #[tokio::test]

@@ -1105,7 +1105,8 @@ Examples (tool calls use JSON format):\n\
 
         format!(
             "\n\n## Current Conversation\n\
-             This is who you're talking to (omit 'target' to send here):\n{}",
+             This is who you're talking to. When using the `message` tool, omit 'target' to reply here.\n\
+             If thread_ts is present, pass it to the `message` tool's thread_ts parameter to reply in the correct thread.\n{}",
             lines.join("\n")
         )
     }
@@ -3393,6 +3394,20 @@ That's my plan."#;
         let pre_truncated = truncate_at_tool_tags(raw);
         let cleaned = clean_response(&pre_truncated);
         assert!(cleaned.trim().is_empty());
+    }
+
+    #[test]
+    fn build_conversation_section_mentions_thread_ts_message_guidance() {
+        let reasoning = Reasoning::new(Arc::new(crate::testing::StubLlm::new("ok")))
+            .with_channel("slack")
+            .with_conversation_data("group", "C0APDPNRGVB")
+            .with_conversation_data("thread_ts", "1774765635.494569");
+
+        let section = reasoning.build_conversation_section();
+
+        assert!(section.contains("When using the `message` tool"));
+        assert!(section.contains("pass it to the `message` tool's thread_ts parameter"));
+        assert!(section.contains("- thread_ts: 1774765635.494569"));
     }
 
     // ---- select_tools truncation guard ----

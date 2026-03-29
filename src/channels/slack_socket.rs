@@ -32,7 +32,7 @@ const TYPING_INTERVAL: Duration = Duration::from_secs(3);
 const SOCKET_BACKOFF_MIN: Duration = Duration::from_secs(2);
 const SOCKET_BACKOFF_MAX: Duration = Duration::from_secs(60);
 const PRESENCE_REFRESH_INTERVAL: Duration = Duration::from_secs(5 * 60);
-const THREAD_CONTEXT_MESSAGE_LIMIT: usize = 8;
+const THREAD_CONTEXT_MESSAGE_LIMIT: usize = 50;
 const THREAD_CONTEXT_TEXT_LIMIT: usize = 280;
 
 type SlackSocketStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
