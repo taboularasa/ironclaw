@@ -681,15 +681,11 @@ impl WasmToolSchemas {
     ///
     /// Collects properties from top-level `properties` and from
     /// `oneOf`/`anyOf`/`allOf` variants. Keeps only properties that are in
-    /// the top-level `required` array or carry an `enum`/`const` constraint.
+    /// the top-level `required` array, are required in any variant, or carry
+    /// an `enum`/`const` constraint.
     /// For properties defined via `const` across multiple variants (e.g.
     /// `"action": {"const": "get_repo"}` in each `oneOf` branch), the `const`
     /// values are merged into a single `enum` array.
-    ///
-    /// Variant-level `required` fields (e.g. `owner`, `repo` required within
-    /// each `oneOf` variant but not top-level) are intentionally omitted from
-    /// the compact schema — the LLM can discover them via
-    /// `tool_info(detail: "schema")`.
     ///
     /// At most `MAX_COMPACT_PROPERTIES` properties are collected to bound
     /// allocations from adversarial schemas.
@@ -705,6 +701,8 @@ impl WasmToolSchemas {
                     .collect()
             })
             .unwrap_or_default();
+        let mut variant_required: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
 
         // Collect properties from top-level and oneOf/anyOf/allOf variants.
         // For properties with `const` across variants, merge into an `enum`.
@@ -724,6 +722,11 @@ impl WasmToolSchemas {
         for key in ["oneOf", "anyOf", "allOf"] {
             if let Some(variants) = discovery.get(key).and_then(|v| v.as_array()) {
                 for variant in variants {
+                    if let Some(req) = variant.get("required").and_then(|r| r.as_array()) {
+                        for name in req.iter().filter_map(|v| v.as_str()) {
+                            variant_required.insert(name.to_string());
+                        }
+                    }
                     if let Some(props) = variant.get("properties").and_then(|p| p.as_object()) {
                         for (k, v) in props {
                             if all_properties.len() >= MAX_COMPACT_PROPERTIES
@@ -763,7 +766,10 @@ impl WasmToolSchemas {
         let kept: serde_json::Map<String, serde_json::Value> = all_properties
             .into_iter()
             .filter(|(name, prop)| {
-                required.contains(name) || prop.get("enum").is_some() || prop.get("const").is_some()
+                required.contains(name)
+                    || variant_required.contains(name)
+                    || prop.get("enum").is_some()
+                    || prop.get("const").is_some()
             })
             .collect();
 
@@ -2241,10 +2247,10 @@ mod tests {
             props.contains_key("state"),
             "state should be kept (has enum)"
         );
-        // owner/repo: not in top-level required, no enum → intentionally dropped
-        // (variant-level required is omitted; discoverable via tool_info)
-        assert!(!props.contains_key("owner"), "owner should be dropped");
-        assert!(!props.contains_key("repo"), "repo should be dropped");
+        // owner/repo: required in at least one variant → kept so the compact
+        // schema advertises the parameters the LLM must actually populate.
+        assert!(props.contains_key("owner"), "owner should be kept");
+        assert!(props.contains_key("repo"), "repo should be kept");
         assert_eq!(compacted["additionalProperties"], true);
         assert_eq!(compacted["required"], serde_json::json!(["action"]));
     }

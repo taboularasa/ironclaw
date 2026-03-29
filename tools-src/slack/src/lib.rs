@@ -7,22 +7,42 @@
 //! # Capabilities Required
 //!
 //! - HTTP: `slack.com/api/*` (GET, POST)
-//! - Secrets: `slack_bot_token` (injected automatically)
+//! - Secrets: `slack_bot_token` (injected automatically by the host)
+//!
+//! # Required Bot Token Scopes
+//!
+//! - `chat:write`       -- send messages
+//! - `channels:read`    -- list public channels, get channel info/members
+//! - `channels:history` -- read public channel history and thread replies
+//! - `groups:read`      -- list/info private channels, get private channel members
+//! - `groups:history`   -- read private channel history and thread replies
+//! - `reactions:write`  -- add emoji reactions
+//! - `users:read`       -- look up user info
+//!
+//! # Additional Scope for search_messages
+//!
+//! - `search:read` -- requires a **user token** (xoxp-…), not a bot token.
+//!   See the `search_messages` action docs for details.
 //!
 //! # Supported Actions
 //!
-//! - `send_message`: Send a message to a channel
-//! - `list_channels`: List channels the bot has access to
-//! - `get_channel_history`: Get recent messages from a channel
-//! - `get_thread_replies`: Get replies from a Slack thread
-//! - `post_reaction`: Add an emoji reaction to a message
-//! - `set_presence`: Update the bot presence indicator
-//! - `get_user_info`: Get information about a Slack user
+//! - `send_message`        -- Send a message (or thread reply) to a channel
+//! - `list_channels`       -- List all channels the bot can see
+//! - `list_joined_channels`-- List only channels where the bot is a member
+//! - `get_channel_history` -- Get recent messages from a channel
+//! - `get_thread_replies`  -- Get all replies in a thread (conversations.replies)
+//! - `get_channel_info`    -- Get full metadata for a single channel
+//! - `get_channel_members` -- Get the member list of a channel
+//! - `post_reaction`       -- Add an emoji reaction to a message
+//! - `get_user_info`       -- Get information about a Slack user
+//! - `search_messages`     -- Full-text search across the workspace (user token required)
 //!
 //! # Example Usage
 //!
 //! ```json
 //! {"action": "send_message", "channel": "#general", "text": "Hello from the agent!"}
+//! {"action": "get_thread_replies", "channel": "C1234567890", "ts": "1710000000.000100"}
+//! {"action": "search_messages", "query": "deployment failed", "channel": "#ops"}
 //! ```
 
 mod api;
@@ -58,54 +78,197 @@ impl exports::near::agent::tool::Guest for SlackTool {
         r#"{
             "type": "object",
             "required": ["action"],
-            "properties": {
-                "action": {
-                    "type": "string",
-                    "enum": ["send_message", "list_channels", "get_channel_history", "get_thread_replies", "post_reaction", "set_presence", "get_user_info"],
-                    "description": "The Slack operation to perform"
+            "oneOf": [
+                {
+                    "properties": {
+                        "action": {
+                            "const": "send_message",
+                            "description": "Send a message to a channel or thread"
+                        },
+                        "channel": {
+                            "type": "string",
+                            "description": "Channel ID or name (e.g., '#general' or 'C1234567890')"
+                        },
+                        "text": {
+                            "type": "string",
+                            "description": "Message text (supports Slack mrkdwn formatting)"
+                        },
+                        "thread_ts": {
+                            "type": "string",
+                            "description": "Optional thread timestamp to reply in a thread"
+                        }
+                    },
+                    "required": ["action", "channel", "text"]
                 },
-                "channel": {
-                    "type": "string",
-                    "description": "Channel ID or name (e.g., '#general' or 'C1234567890'). Required for: send_message, get_channel_history, get_thread_replies, post_reaction"
+                {
+                    "properties": {
+                        "action": {
+                            "const": "list_channels",
+                            "description": "List channels the bot can access"
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Maximum number of channels to return (default 100)"
+                        }
+                    },
+                    "required": ["action"]
                 },
-                "text": {
-                    "type": "string",
-                    "description": "Message text (supports Slack mrkdwn formatting). Required for: send_message"
+                {
+                    "properties": {
+                        "action": {
+                            "const": "list_joined_channels",
+                            "description": "List only channels where the bot is a member"
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Maximum number of channels to scan before filtering (default 200)"
+                        }
+                    },
+                    "required": ["action"]
                 },
-                "thread_ts": {
-                    "type": "string",
-                    "description": "Thread timestamp to reply in a thread. Used by: send_message, get_thread_replies"
+                {
+                    "properties": {
+                        "action": {
+                            "const": "get_channel_history",
+                            "description": "Get recent messages from a channel"
+                        },
+                        "channel": {
+                            "type": "string",
+                            "description": "Channel ID (for example 'C1234567890')"
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Maximum number of messages to return (default 20)"
+                        }
+                    },
+                    "required": ["action", "channel"]
                 },
-                "limit": {
-                    "type": "integer",
-                    "description": "Maximum number of results to return. Used by: list_channels, get_channel_history"
+                {
+                    "properties": {
+                        "action": {
+                            "const": "get_thread_replies",
+                            "description": "Get all replies in a thread using conversations.replies"
+                        },
+                        "channel": {
+                            "type": "string",
+                            "description": "Channel ID containing the thread"
+                        },
+                        "ts": {
+                            "type": "string",
+                            "description": "Timestamp of the parent (root) message of the thread"
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Maximum number of thread messages to return (default 50)"
+                        }
+                    },
+                    "required": ["action", "channel", "ts"]
                 },
-                "timestamp": {
-                    "type": "string",
-                    "description": "Timestamp of the message to react to. Required for: post_reaction"
+                {
+                    "properties": {
+                        "action": {
+                            "const": "get_channel_info",
+                            "description": "Get full metadata for a channel"
+                        },
+                        "channel": {
+                            "type": "string",
+                            "description": "Channel ID"
+                        }
+                    },
+                    "required": ["action", "channel"]
                 },
-                "emoji": {
-                    "type": "string",
-                    "description": "Emoji name without colons (e.g., 'thumbsup'). Required for: post_reaction"
+                {
+                    "properties": {
+                        "action": {
+                            "const": "get_channel_members",
+                            "description": "Get the member list of a channel"
+                        },
+                        "channel": {
+                            "type": "string",
+                            "description": "Channel ID"
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Maximum number of member IDs to return (default 100)"
+                        }
+                    },
+                    "required": ["action", "channel"]
                 },
-                "presence": {
-                    "type": "string",
-                    "description": "Presence value accepted by Slack. Required for: set_presence"
+                {
+                    "properties": {
+                        "action": {
+                            "const": "post_reaction",
+                            "description": "Add a reaction to a message"
+                        },
+                        "channel": {
+                            "type": "string",
+                            "description": "Channel ID containing the message"
+                        },
+                        "timestamp": {
+                            "type": "string",
+                            "description": "Timestamp of the message to react to"
+                        },
+                        "emoji": {
+                            "type": "string",
+                            "description": "Emoji name without colons (for example 'thumbsup')"
+                        }
+                    },
+                    "required": ["action", "channel", "timestamp", "emoji"]
                 },
-                "user_id": {
-                    "type": "string",
-                    "description": "User ID (e.g., 'U1234567890'). Required for: get_user_info"
+                {
+                    "properties": {
+                        "action": {
+                            "const": "get_user_info",
+                            "description": "Get information about a Slack user"
+                        },
+                        "user_id": {
+                            "type": "string",
+                            "description": "User ID (for example 'U1234567890')"
+                        }
+                    },
+                    "required": ["action", "user_id"]
+                },
+                {
+                    "properties": {
+                        "action": {
+                            "const": "search_messages",
+                            "description": "Search across the workspace; requires a user token with search:read"
+                        },
+                        "query": {
+                            "type": "string",
+                            "description": "Slack search query string. Supports modifiers like 'in:#channel', 'from:@user', 'before:2024-01-01'"
+                        },
+                        "channel": {
+                            "type": "string",
+                            "description": "Optional channel name or ID filter"
+                        },
+                        "count": {
+                            "type": "integer",
+                            "description": "Maximum number of search results to return (default 20, max 100)"
+                        }
+                    },
+                    "required": ["action", "query"]
                 }
-            }
+            ]
         }"#
         .to_string()
     }
 
     fn description() -> String {
-        "Slack integration tool for sending messages, listing channels, reading channel and \
-         thread history, adding reactions, setting presence, and getting user information. Requires a Slack bot \
-         token with appropriate scopes (chat:write, channels:read, channels:history, \
-         groups:history, im:history, mpim:history, reactions:write, users:read, users:write)."
+        "Slack integration tool. Supports sending messages (including thread replies), \
+         listing all channels or only joined channels, reading channel history, reading \
+         full thread replies (conversations.replies -- the fix for thread readback), \
+         getting channel metadata, listing channel members, adding emoji reactions, \
+         looking up user info, and full-text message search across the workspace. \
+         Action-specific required params: send_message(channel,text), \
+         get_channel_history(channel), get_thread_replies(channel,ts), \
+         get_channel_info(channel), get_channel_members(channel), \
+         post_reaction(channel,timestamp,emoji), get_user_info(user_id), \
+         search_messages(query[,channel]). \
+         Most actions require a bot token (xoxb-) with appropriate scopes: \
+         chat:write, channels:read, channels:history, groups:read, groups:history, \
+         reactions:write, users:read. \
+         The search_messages action requires a user token (xoxp-) with the search:read scope."
             .to_string()
     }
 }
@@ -149,15 +312,6 @@ fn execute_inner(params: &str) -> Result<String, String> {
             serde_json::to_string(&result).map_err(|e| e.to_string())?
         }
 
-        SlackAction::GetThreadReplies {
-            channel,
-            thread_ts,
-            limit,
-        } => {
-            let result = api::get_thread_replies(&channel, &thread_ts, limit)?;
-            serde_json::to_string(&result).map_err(|e| e.to_string())?
-        }
-
         SlackAction::PostReaction {
             channel,
             timestamp,
@@ -167,13 +321,44 @@ fn execute_inner(params: &str) -> Result<String, String> {
             serde_json::to_string(&result).map_err(|e| e.to_string())?
         }
 
-        SlackAction::SetPresence { presence } => {
-            let result = api::set_presence(&presence)?;
+        SlackAction::GetUserInfo { user_id } => {
+            let result = api::get_user_info(&user_id)?;
             serde_json::to_string(&result).map_err(|e| e.to_string())?
         }
 
-        SlackAction::GetUserInfo { user_id } => {
-            let result = api::get_user_info(&user_id)?;
+        // ── New actions ──────────────────────────────────────────────────────
+
+        SlackAction::GetThreadReplies { channel, ts, limit } => {
+            let result = api::get_thread_replies(&channel, &ts, limit)?;
+            serde_json::to_string(&result).map_err(|e| e.to_string())?
+        }
+
+        SlackAction::SearchMessages {
+            query,
+            channel,
+            count,
+        } => {
+            // NOTE: search_messages requires a user token (xoxp-) with the
+            // `search:read` scope. The host injects the token automatically,
+            // but the token configured in secrets must be a user token for
+            // this action to succeed. Bot tokens will receive
+            // `error: "not_allowed_token_type"` from the Slack API.
+            let result = api::search_messages(&query, channel.as_deref(), count)?;
+            serde_json::to_string(&result).map_err(|e| e.to_string())?
+        }
+
+        SlackAction::GetChannelMembers { channel, limit } => {
+            let result = api::get_channel_members(&channel, limit)?;
+            serde_json::to_string(&result).map_err(|e| e.to_string())?
+        }
+
+        SlackAction::ListJoinedChannels { limit } => {
+            let result = api::list_joined_channels(limit)?;
+            serde_json::to_string(&result).map_err(|e| e.to_string())?
+        }
+
+        SlackAction::GetChannelInfo { channel } => {
+            let result = api::get_channel_info(&channel)?;
             serde_json::to_string(&result).map_err(|e| e.to_string())?
         }
     };

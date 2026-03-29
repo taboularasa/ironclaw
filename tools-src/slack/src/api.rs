@@ -58,6 +58,8 @@ fn slack_api_call(method: &str, endpoint: &str, body: Option<&str>) -> Result<St
     String::from_utf8(response.body).map_err(|e| format!("Invalid UTF-8 in response: {}", e))
 }
 
+// ── Existing API functions ───────────────────────────────────────────────────
+
 /// Send a message to a Slack channel.
 pub fn send_message(
     channel: &str,
@@ -167,49 +169,6 @@ pub fn get_channel_history(channel: &str, limit: u32) -> Result<ChannelHistoryRe
     Ok(ChannelHistoryResult { ok: true, messages })
 }
 
-/// Get replies from a thread in a Slack channel.
-pub fn get_thread_replies(
-    channel: &str,
-    thread_ts: &str,
-    limit: u32,
-) -> Result<ChannelHistoryResult, String> {
-    let url = format!(
-        "conversations.replies?channel={}&ts={}&limit={}",
-        url_encode(channel),
-        url_encode(thread_ts),
-        limit
-    );
-
-    let response = slack_api_call("GET", &url, None)?;
-
-    let parsed: serde_json::Value =
-        serde_json::from_str(&response).map_err(|e| format!("Failed to parse response: {}", e))?;
-
-    if !parsed["ok"].as_bool().unwrap_or(false) {
-        let error = parsed["error"].as_str().unwrap_or("unknown_error");
-        return Err(format!("Slack API error: {}", error));
-    }
-
-    let messages = parsed["messages"]
-        .as_array()
-        .map(|arr| {
-            arr.iter()
-                .map(|m| HistoryMessage {
-                    ts: m["ts"].as_str().unwrap_or("").to_string(),
-                    text: m["text"].as_str().unwrap_or("").to_string(),
-                    user: m["user"]
-                        .as_str()
-                        .or_else(|| m["bot_id"].as_str())
-                        .map(|s| s.to_string()),
-                    msg_type: m["type"].as_str().unwrap_or("message").to_string(),
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-
-    Ok(ChannelHistoryResult { ok: true, messages })
-}
-
 /// Add a reaction to a message.
 pub fn post_reaction(
     channel: &str,
@@ -239,29 +198,6 @@ pub fn post_reaction(
     Ok(PostReactionResult { ok: true })
 }
 
-/// Set the bot presence indicator.
-pub fn set_presence(presence: &str) -> Result<SetPresenceResult, String> {
-    let payload = serde_json::json!({
-        "presence": presence,
-    });
-
-    let body = serde_json::to_string(&payload).map_err(|e| e.to_string())?;
-    let response = slack_api_call("POST", "users.setPresence", Some(&body))?;
-
-    let parsed: serde_json::Value =
-        serde_json::from_str(&response).map_err(|e| format!("Failed to parse response: {}", e))?;
-
-    if !parsed["ok"].as_bool().unwrap_or(false) {
-        let error = parsed["error"].as_str().unwrap_or("unknown_error");
-        return Err(format!("Slack API error: {}", error));
-    }
-
-    Ok(SetPresenceResult {
-        ok: true,
-        presence: presence.to_string(),
-    })
-}
-
 /// Get information about a user.
 pub fn get_user_info(user_id: &str) -> Result<GetUserInfoResult, String> {
     let url = format!("users.info?user={}", url_encode(user_id));
@@ -288,6 +224,270 @@ pub fn get_user_info(user_id: &str) -> Result<GetUserInfoResult, String> {
             display_name: profile["display_name"].as_str().map(|s| s.to_string()),
             email: profile["email"].as_str().map(|s| s.to_string()),
             is_bot: user["is_bot"].as_bool().unwrap_or(false),
+        },
+    })
+}
+
+// ── New API functions ────────────────────────────────────────────────────────
+
+/// Get all replies in a thread.
+///
+/// Uses `conversations.replies` with the channel and the timestamp (`ts`) of
+/// the thread's root (parent) message. The first message in the returned list
+/// is always the root message itself; subsequent messages are the replies.
+///
+/// Required bot token scopes: `channels:history` (public channels),
+/// `groups:history` (private channels), `im:history` (DMs),
+/// `mpim:history` (multi-party DMs).
+pub fn get_thread_replies(
+    channel: &str,
+    ts: &str,
+    limit: u32,
+) -> Result<GetThreadRepliesResult, String> {
+    let url = format!(
+        "conversations.replies?channel={}&ts={}&limit={}",
+        url_encode(channel),
+        url_encode(ts),
+        limit
+    );
+
+    let response = slack_api_call("GET", &url, None)?;
+
+    let parsed: serde_json::Value =
+        serde_json::from_str(&response).map_err(|e| format!("Failed to parse response: {}", e))?;
+
+    if !parsed["ok"].as_bool().unwrap_or(false) {
+        let error = parsed["error"].as_str().unwrap_or("unknown_error");
+        return Err(format!("Slack API error: {}", error));
+    }
+
+    let messages = parsed["messages"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .enumerate()
+                .map(|(i, m)| ThreadMessage {
+                    ts: m["ts"].as_str().unwrap_or("").to_string(),
+                    text: m["text"].as_str().unwrap_or("").to_string(),
+                    user: m["user"].as_str().map(|s| s.to_string()),
+                    msg_type: m["type"].as_str().unwrap_or("message").to_string(),
+                    // Slack always places the root message first
+                    is_root: if i == 0 { Some(true) } else { None },
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // reply_count lives on the root message object inside the array
+    let reply_count = parsed["messages"]
+        .as_array()
+        .and_then(|arr| arr.first())
+        .and_then(|root| root["reply_count"].as_u64())
+        .unwrap_or(0) as u32;
+
+    Ok(GetThreadRepliesResult {
+        ok: true,
+        messages,
+        reply_count,
+    })
+}
+
+/// Search for messages across the workspace.
+///
+/// Uses `search.messages`.
+///
+/// IMPORTANT: This function requires a **user token** (xoxp-…) with the
+/// `search:read` scope. Bot tokens (xoxb-…) cannot call `search.messages`.
+/// The calling convention is identical -- the host injects the token -- but
+/// the token configured in secrets must be a user token for this action to
+/// succeed.
+///
+/// Required user token scope: `search:read`.
+pub fn search_messages(
+    query: &str,
+    channel: Option<&str>,
+    count: u32,
+) -> Result<SearchMessagesResult, String> {
+    // Build the effective query string, optionally scoping to a channel.
+    let full_query = match channel {
+        Some(ch) => format!("{} in:{}", query, ch),
+        None => query.to_string(),
+    };
+
+    let url = format!(
+        "search.messages?query={}&count={}",
+        url_encode(&full_query),
+        count
+    );
+
+    let response = slack_api_call("GET", &url, None)?;
+
+    let parsed: serde_json::Value =
+        serde_json::from_str(&response).map_err(|e| format!("Failed to parse response: {}", e))?;
+
+    if !parsed["ok"].as_bool().unwrap_or(false) {
+        let error = parsed["error"].as_str().unwrap_or("unknown_error");
+        return Err(format!("Slack API error: {}", error));
+    }
+
+    let total = parsed["messages"]["total"].as_u64().unwrap_or(0) as u32;
+
+    let matches = parsed["messages"]["matches"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .map(|m| {
+                    let channel_obj = &m["channel"];
+                    SearchMatch {
+                        ts: m["ts"].as_str().unwrap_or("").to_string(),
+                        text: m["text"].as_str().unwrap_or("").to_string(),
+                        user: m["user"].as_str().map(|s| s.to_string()),
+                        username: m["username"].as_str().map(|s| s.to_string()),
+                        channel_id: channel_obj["id"].as_str().unwrap_or("").to_string(),
+                        channel_name: channel_obj["name"].as_str().unwrap_or("").to_string(),
+                        thread_ts: m["thread_ts"].as_str().map(|s| s.to_string()),
+                        permalink: m["permalink"].as_str().map(|s| s.to_string()),
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Ok(SearchMessagesResult {
+        ok: true,
+        query: full_query,
+        total,
+        matches,
+    })
+}
+
+/// Get the member list of a channel.
+///
+/// Uses `conversations.members`. Returns Slack user IDs only; call
+/// `get_user_info` to resolve names. For very large channels the list is
+/// capped by `limit` -- full pagination is not yet supported.
+///
+/// Required bot token scopes: `channels:read` (public channels),
+/// `groups:read` (private channels).
+pub fn get_channel_members(
+    channel: &str,
+    limit: u32,
+) -> Result<GetChannelMembersResult, String> {
+    let url = format!(
+        "conversations.members?channel={}&limit={}",
+        url_encode(channel),
+        limit
+    );
+
+    let response = slack_api_call("GET", &url, None)?;
+
+    let parsed: serde_json::Value =
+        serde_json::from_str(&response).map_err(|e| format!("Failed to parse response: {}", e))?;
+
+    if !parsed["ok"].as_bool().unwrap_or(false) {
+        let error = parsed["error"].as_str().unwrap_or("unknown_error");
+        return Err(format!("Slack API error: {}", error));
+    }
+
+    let members = parsed["members"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Ok(GetChannelMembersResult {
+        ok: true,
+        channel: channel.to_string(),
+        members,
+    })
+}
+
+/// List only the channels that the bot is a member of.
+///
+/// Calls `conversations.list` (same as `list_channels`) and then filters the
+/// results to those where `is_member == true`. This is useful for agents that
+/// should only operate in channels they have been explicitly invited to.
+///
+/// Required bot token scopes: `channels:read` (public channels),
+/// `groups:read` (private channels).
+pub fn list_joined_channels(limit: u32) -> Result<ListChannelsResult, String> {
+    // Fetch up to `limit` channels from the API (same endpoint as list_channels).
+    let url = format!(
+        "conversations.list?types=public_channel,private_channel&limit={}",
+        limit
+    );
+
+    let response = slack_api_call("GET", &url, None)?;
+
+    let parsed: serde_json::Value =
+        serde_json::from_str(&response).map_err(|e| format!("Failed to parse response: {}", e))?;
+
+    if !parsed["ok"].as_bool().unwrap_or(false) {
+        let error = parsed["error"].as_str().unwrap_or("unknown_error");
+        return Err(format!("Slack API error: {}", error));
+    }
+
+    // Filter to only channels where the bot is a member.
+    let channels = parsed["channels"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter(|c| c["is_member"].as_bool().unwrap_or(false))
+                .map(|c| Channel {
+                    id: c["id"].as_str().unwrap_or("").to_string(),
+                    name: c["name"].as_str().unwrap_or("").to_string(),
+                    is_private: c["is_private"].as_bool().unwrap_or(false),
+                    is_member: true,
+                    topic: c["topic"]["value"].as_str().map(|s| s.to_string()),
+                    purpose: c["purpose"]["value"].as_str().map(|s| s.to_string()),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Ok(ListChannelsResult { ok: true, channels })
+}
+
+/// Get full metadata for a single channel.
+///
+/// Uses `conversations.info`. Returns richer data than `list_channels`,
+/// including member count, creation timestamp, and full topic/purpose text.
+///
+/// Required bot token scopes: `channels:read` (public channels),
+/// `groups:read` (private channels).
+pub fn get_channel_info(channel: &str) -> Result<GetChannelInfoResult, String> {
+    let url = format!(
+        "conversations.info?channel={}",
+        url_encode(channel)
+    );
+
+    let response = slack_api_call("GET", &url, None)?;
+
+    let parsed: serde_json::Value =
+        serde_json::from_str(&response).map_err(|e| format!("Failed to parse response: {}", e))?;
+
+    if !parsed["ok"].as_bool().unwrap_or(false) {
+        let error = parsed["error"].as_str().unwrap_or("unknown_error");
+        return Err(format!("Slack API error: {}", error));
+    }
+
+    let ch = &parsed["channel"];
+
+    Ok(GetChannelInfoResult {
+        ok: true,
+        channel: ChannelInfo {
+            id: ch["id"].as_str().unwrap_or("").to_string(),
+            name: ch["name"].as_str().unwrap_or("").to_string(),
+            is_private: ch["is_private"].as_bool().unwrap_or(false),
+            is_member: ch["is_member"].as_bool().unwrap_or(false),
+            num_members: ch["num_members"].as_u64().map(|n| n as u32),
+            created: ch["created"].as_i64(),
+            topic: ch["topic"]["value"].as_str().map(|s| s.to_string()),
+            purpose: ch["purpose"]["value"].as_str().map(|s| s.to_string()),
+            is_archived: ch["is_archived"].as_bool().unwrap_or(false),
         },
     })
 }
