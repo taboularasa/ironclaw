@@ -34,6 +34,7 @@ pub async fn setup_wasm_channels(
     secrets_store: &Option<Arc<dyn SecretsStore + Send + Sync>>,
     extension_manager: Option<&Arc<ExtensionManager>>,
     database: Option<&Arc<dyn Database>>,
+    excluded_channels: &HashSet<String>,
 ) -> Option<WasmChannelSetup> {
     let runtime = match WasmChannelRuntime::new(WasmChannelRuntimeConfig::default()) {
         Ok(r) => Arc::new(r),
@@ -72,6 +73,10 @@ pub async fn setup_wasm_channels(
     let mut channel_names: Vec<String> = Vec::new();
 
     for loaded in results.loaded {
+        if excluded_channels.contains(loaded.name()) {
+            tracing::info!(channel = loaded.name(), "Skipping excluded WASM channel");
+            continue;
+        }
         let (name, channel) = register_channel(
             loaded,
             config,

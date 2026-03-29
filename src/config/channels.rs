@@ -16,6 +16,7 @@ pub struct ChannelsConfig {
     pub http: Option<HttpConfig>,
     pub gateway: Option<GatewayConfig>,
     pub signal: Option<SignalConfig>,
+    pub slack_socket: Option<SlackSocketConfig>,
     /// Directory containing WASM channel modules (default: ~/.ironclaw/channels/).
     pub wasm_channels_dir: std::path::PathBuf,
     /// Whether WASM channels are enabled.
@@ -109,6 +110,20 @@ pub struct SignalConfig {
     pub ignore_attachments: bool,
     /// Skip story messages.
     pub ignore_stories: bool,
+}
+
+/// Native Slack Socket Mode channel configuration.
+#[derive(Debug, Clone)]
+pub struct SlackSocketConfig {
+    /// App-level token (`xapp-...`) for Socket Mode websocket access.
+    pub app_token: String,
+    /// Bot token (`xoxb-...`) for Slack Web API calls.
+    pub bot_token: String,
+    /// Slack signing secret. Present for parity with the webhook channel, but
+    /// not currently used by Socket Mode.
+    pub signing_secret: String,
+    /// Optional bot user ID used to ignore self-authored messages.
+    pub bot_user_id: Option<String>,
 }
 
 impl ChannelsConfig {
@@ -325,6 +340,19 @@ impl ChannelsConfig {
             None
         };
 
+        let slack_socket = match (
+            optional_env("SLACK_APP_TOKEN")?,
+            optional_env("SLACK_BOT_TOKEN")?,
+        ) {
+            (Some(app_token), Some(bot_token)) => Some(SlackSocketConfig {
+                app_token,
+                bot_token,
+                signing_secret: optional_env("SLACK_SIGNING_SECRET")?.unwrap_or_default(),
+                bot_user_id: optional_env("SLACK_BOT_USER_ID")?,
+            }),
+            _ => None,
+        };
+
         let cli_enabled = parse_bool_env("CLI_ENABLED", cs.cli_enabled)?;
 
         Ok(Self {
@@ -334,6 +362,7 @@ impl ChannelsConfig {
             http,
             gateway,
             signal,
+            slack_socket,
             wasm_channels_dir: optional_env("WASM_CHANNELS_DIR")?
                 .map(PathBuf::from)
                 .or_else(|| cs.wasm_channels_dir.clone())
@@ -493,6 +522,7 @@ mod tests {
             http: None,
             gateway: None,
             signal: None,
+            slack_socket: None,
             wasm_channels_dir: PathBuf::from("/tmp/channels"),
             wasm_channels_enabled: true,
             wasm_channel_owner_ids: HashMap::new(),
@@ -517,6 +547,7 @@ mod tests {
             http: None,
             gateway: None,
             signal: None,
+            slack_socket: None,
             wasm_channels_dir: PathBuf::from("/opt/channels"),
             wasm_channels_enabled: false,
             wasm_channel_owner_ids: ids,
