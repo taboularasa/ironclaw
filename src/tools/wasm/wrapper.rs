@@ -591,6 +591,8 @@ pub struct WasmToolWrapper {
     secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
     /// OAuth refresh configuration for auto-refreshing expired tokens.
     oauth_refresh: Option<OAuthRefreshConfig>,
+    /// Explicit secret_name -> env var fallbacks declared by the tool auth config.
+    env_secret_fallbacks: HashMap<String, String>,
     /// Optional HTTP interceptor for testing — returns canned responses
     /// instead of making real requests when set.
     http_interceptor: Option<Arc<dyn HttpInterceptor>>,
@@ -823,6 +825,7 @@ impl WasmToolWrapper {
             credentials: HashMap::new(),
             secrets_store: None,
             oauth_refresh: None,
+            env_secret_fallbacks: HashMap::new(),
             http_interceptor: None,
         }
     }
@@ -885,6 +888,12 @@ impl WasmToolWrapper {
     /// each call and silently refreshes it using the stored refresh token.
     pub fn with_oauth_refresh(mut self, config: OAuthRefreshConfig) -> Self {
         self.oauth_refresh = Some(config);
+        self
+    }
+
+    /// Allow explicit env-var fallbacks for auth-backed credentials.
+    pub fn with_env_secret_fallbacks(mut self, fallbacks: HashMap<String, String>) -> Self {
+        self.env_secret_fallbacks = fallbacks;
         self
     }
 
@@ -1113,13 +1122,27 @@ impl Tool for WasmToolWrapper {
         // This decrypts the secrets once so the sync http_request() host function
         // can inject them without needing async access.
         let credential_user_id = &ctx.user_id;
+        tracing::info!(
+            tool = %self.prepared.name,
+            user_id = %credential_user_id,
+            env_secret_fallbacks = ?self.env_secret_fallbacks,
+            has_secrets_store = self.secrets_store.is_some(),
+            "WASM credential injection: starting host credential resolution"
+        );
         let host_credentials = resolve_host_credentials(
             &self.capabilities,
             self.secrets_store.as_deref(),
             credential_user_id,
             self.oauth_refresh.as_ref(),
+            &self.env_secret_fallbacks,
         )
         .await;
+        tracing::info!(
+            tool = %self.prepared.name,
+            user_id = %credential_user_id,
+            resolved_credentials = host_credentials.len(),
+            "WASM credential injection: finished host credential resolution"
+        );
 
         // Serialize context for WASM
         let context_json = serde_json::to_string(ctx).ok();
@@ -1131,6 +1154,7 @@ impl Tool for WasmToolWrapper {
         let description = self.description.clone();
         let schemas = self.schemas.clone();
         let credentials = self.credentials.clone();
+        let env_secret_fallbacks = self.env_secret_fallbacks.clone();
 
         // Execute in blocking task with timeout
         let result = tokio::time::timeout(timeout, async move {
@@ -1143,6 +1167,7 @@ impl Tool for WasmToolWrapper {
                 credentials,
                 secrets_store: None, // Not needed in blocking task
                 oauth_refresh: None, // Already used above for pre-refresh
+                env_secret_fallbacks,
                 http_interceptor: self.http_interceptor.clone(),
             };
 
@@ -1429,27 +1454,30 @@ async fn resolve_host_credentials(
     store: Option<&(dyn SecretsStore + Send + Sync)>,
     user_id: &str,
     oauth_refresh: Option<&OAuthRefreshConfig>,
+    env_secret_fallbacks: &HashMap<String, String>,
 ) -> Vec<ResolvedHostCredential> {
-    let store = match store {
-        Some(s) => s,
-        None => {
-            // If tool requires credentials but has no secrets store, this is a configuration error
-            if let Some(http_cap) = &capabilities.http
-                && !http_cap.credentials.is_empty()
-            {
-                tracing::warn!(
-                    user_id = %user_id,
-                    "WASM tool requires credentials but secrets_store is not configured - authentication will fail"
-                );
-            }
-            return Vec::new();
-        }
+    let http_cap = match &capabilities.http {
+        Some(cap) => cap,
+        None => return Vec::new(),
     };
+
+    if http_cap.credentials.is_empty() {
+        return Vec::new();
+    }
+
+    if store.is_none() && env_secret_fallbacks.is_empty() {
+        tracing::warn!(
+            user_id = %user_id,
+            "WASM tool requires credentials but neither secrets_store nor env fallbacks are configured"
+        );
+    }
 
     // Check if the access token needs refreshing before resolving credentials.
     // This runs once per tool execution, keeping the hot path (credential injection
     // inside WASM) synchronous and allocation-free.
-    if let Some(config) = oauth_refresh {
+    if let Some(config) = oauth_refresh
+        && let Some(store) = store
+    {
         let needs_refresh = match store.get(user_id, &config.secret_name).await {
             Ok(secret) => match secret.expires_at {
                 Some(expires_at) => {
@@ -1474,15 +1502,6 @@ async fn resolve_host_credentials(
         }
     }
 
-    let http_cap = match &capabilities.http {
-        Some(cap) => cap,
-        None => return Vec::new(),
-    };
-
-    if http_cap.credentials.is_empty() {
-        return Vec::new();
-    }
-
     let mut resolved = Vec::new();
 
     for mapping in http_cap.credentials.values() {
@@ -1494,39 +1513,80 @@ async fn resolve_host_credentials(
             continue;
         }
 
+        let env_var_fallback = env_secret_fallbacks
+            .get(&mapping.secret_name)
+            .map(String::as_str)
+            .unwrap_or("<none>");
+        tracing::info!(
+            secret_name = %mapping.secret_name,
+            env_var_fallback,
+            user_id = %user_id,
+            has_secrets_store = store.is_some(),
+            "WASM credential injection: resolving credential"
+        );
+
         // Try to get credential under the provided user_id first.
         // If not found and user_id != "default", fallback to "default" (global credentials).
         // This handles OAuth tokens stored globally under "default" but accessed from routine contexts.
-        let secret = match store.get_decrypted(user_id, &mapping.secret_name).await {
-            Ok(s) => Some(s),
-            Err(e) => {
-                tracing::trace!(
-                    user_id = %user_id,
-                    secret_name = %mapping.secret_name,
-                    error = %e,
-                    "No matching host credential resolved for WASM tool in the requested scope"
-                );
-
-                // If lookup fails and we're not already looking up "default", try "default" as fallback
-                if user_id != "default" {
-                    tracing::debug!(
-                        secret_name = %mapping.secret_name,
+        let (secret, resolution_source) = if let Some(store) = store {
+            match store.get_decrypted(user_id, &mapping.secret_name).await {
+                Ok(s) => (Some(s), "user"),
+                Err(e) => {
+                    tracing::trace!(
                         user_id = %user_id,
+                        secret_name = %mapping.secret_name,
                         error = %e,
-                        "Credential not found for user, trying default global credentials"
+                        "No matching host credential resolved for WASM tool in the requested scope"
                     );
-                    store
-                        .get_decrypted("default", &mapping.secret_name)
-                        .await
-                        .ok()
-                } else {
-                    None
+
+                    // If lookup fails and we're not already looking up "default", try "default" as fallback
+                    if user_id != "default" {
+                        tracing::debug!(
+                            secret_name = %mapping.secret_name,
+                            user_id = %user_id,
+                            error = %e,
+                            "Credential not found for user, trying default global credentials"
+                        );
+                        match store.get_decrypted("default", &mapping.secret_name).await {
+                            Ok(s) => (Some(s), "default"),
+                            Err(default_error) => {
+                                tracing::trace!(
+                                    secret_name = %mapping.secret_name,
+                                    user_id = %user_id,
+                                    error = %default_error,
+                                    "No matching host credential resolved for WASM tool in the default scope"
+                                );
+                                (None, "none")
+                            }
+                        }
+                    } else {
+                        (None, "none")
+                    }
                 }
             }
+        } else {
+            (None, "none")
         };
 
+        let (secret, resolution_source) = match secret {
+            Some(secret) => (Some(secret), resolution_source),
+            None => match resolve_env_secret_fallback(&mapping.secret_name, env_secret_fallbacks) {
+                Some(secret) => (Some(secret), "env"),
+                None => (None, "none"),
+            },
+        };
+
+        tracing::info!(
+            secret_name = %mapping.secret_name,
+            env_var_fallback,
+            user_id = %user_id,
+            resolved = secret.is_some(),
+            resolution_source,
+            "WASM credential injection: resolution result"
+        );
+
         let secret = match secret {
-            Some(s) => s,
+            Some(secret) => secret,
             None => {
                 tracing::warn!(
                     secret_name = %mapping.secret_name,
@@ -1539,6 +1599,14 @@ async fn resolve_host_credentials(
 
         let mut injected = InjectedCredentials::empty();
         inject_credential(&mut injected, &mapping.location, &secret);
+        tracing::info!(
+            secret_name = %mapping.secret_name,
+            env_var_fallback,
+            user_id = %user_id,
+            resolution_source,
+            injected = !injected.is_empty(),
+            "WASM credential injection: applied credential mapping"
+        );
 
         if injected.is_empty() {
             continue;
@@ -1560,6 +1628,25 @@ async fn resolve_host_credentials(
     }
 
     resolved
+}
+
+fn resolve_env_secret_fallback(
+    secret_name: &str,
+    env_secret_fallbacks: &HashMap<String, String>,
+) -> Option<DecryptedSecret> {
+    let env_var = env_secret_fallbacks.get(secret_name)?;
+    let value = std::env::var(env_var).ok()?;
+    if value.is_empty() {
+        return None;
+    }
+
+    tracing::debug!(
+        secret_name = %secret_name,
+        env_var = %env_var,
+        "Resolved host credential for WASM tool from environment fallback"
+    );
+
+    DecryptedSecret::from_bytes(value.into_bytes()).ok()
 }
 
 /// Extract the hostname from a URL string.
@@ -1759,6 +1846,7 @@ mod tests {
     use tokio::sync::{Mutex as AsyncMutex, oneshot};
     use uuid::Uuid;
 
+    use crate::config::helpers::lock_env;
     use crate::context::JobContext;
     use crate::secrets::{
         CreateSecretParams, DecryptedSecret, InMemorySecretsStore, Secret, SecretError, SecretRef,
@@ -1773,6 +1861,55 @@ mod tests {
     use crate::tools::tool::Tool;
     use crate::tools::wasm::capabilities::Capabilities;
     use crate::tools::wasm::runtime::{WasmRuntimeConfig, WasmToolRuntime};
+
+    async fn resolve_host_credentials_no_env(
+        capabilities: &Capabilities,
+        store: Option<&(dyn SecretsStore + Send + Sync)>,
+        user_id: &str,
+        oauth_refresh: Option<&super::OAuthRefreshConfig>,
+    ) -> Vec<super::ResolvedHostCredential> {
+        super::resolve_host_credentials(
+            capabilities,
+            store,
+            user_id,
+            oauth_refresh,
+            &HashMap::new(),
+        )
+        .await
+    }
+
+    struct EnvVarGuard {
+        key: String,
+        previous: Option<String>,
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            // SAFETY: Tests use lock_env() to serialize environment access.
+            unsafe {
+                if let Some(ref value) = self.previous {
+                    std::env::set_var(&self.key, value);
+                } else {
+                    std::env::remove_var(&self.key);
+                }
+            }
+        }
+    }
+
+    fn set_env_var(key: &str, value: Option<&str>) -> EnvVarGuard {
+        let previous = std::env::var(key).ok();
+        // SAFETY: Tests use lock_env() to serialize environment access.
+        unsafe {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+        EnvVarGuard {
+            key: key.to_string(),
+            previous,
+        }
+    }
 
     struct RecordingSecretsStore {
         inner: InMemorySecretsStore,
@@ -2253,21 +2390,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_resolve_host_credentials_no_store() {
-        use crate::tools::wasm::wrapper::resolve_host_credentials;
-
         let caps = Capabilities::default();
-        let result = resolve_host_credentials(&caps, None, "user1", None).await;
+        let result = resolve_host_credentials_no_env(&caps, None, "user1", None).await;
         assert!(result.is_empty());
     }
 
     #[tokio::test]
     async fn test_resolve_host_credentials_no_http_cap() {
-        use crate::tools::wasm::wrapper::resolve_host_credentials;
-
         let store = test_secrets_store();
 
         let caps = Capabilities::default();
-        let result = resolve_host_credentials(&caps, Some(&store), "user1", None).await;
+        let result = resolve_host_credentials_no_env(&caps, Some(&store), "user1", None).await;
         assert!(result.is_empty());
     }
 
@@ -2277,8 +2410,6 @@ mod tests {
             CreateSecretParams, CredentialLocation, CredentialMapping, SecretsStore,
         };
         use crate::tools::wasm::capabilities::HttpCapability;
-        use crate::tools::wasm::wrapper::resolve_host_credentials;
-
         let store = test_secrets_store();
 
         store
@@ -2307,7 +2438,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = resolve_host_credentials(&caps, Some(&store), "user1", None).await;
+        let result = resolve_host_credentials_no_env(&caps, Some(&store), "user1", None).await;
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].host_patterns, vec!["www.googleapis.com"]);
         assert_eq!(
@@ -2317,13 +2448,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_resolve_host_credentials_uses_env_fallback() {
+        use crate::secrets::{CredentialLocation, CredentialMapping};
+        use crate::tools::wasm::capabilities::HttpCapability;
+
+        let _env_lock = lock_env();
+        let _env_guard = set_env_var("SLACK_BOT_TOKEN", Some("xoxb-env-fallback"));
+
+        let mut credentials = HashMap::new();
+        credentials.insert(
+            "slack_bot_token".to_string(),
+            CredentialMapping {
+                secret_name: "slack_bot_token".to_string(),
+                location: CredentialLocation::AuthorizationBearer,
+                host_patterns: vec!["slack.com".to_string()],
+            },
+        );
+
+        let caps = Capabilities {
+            http: Some(HttpCapability {
+                credentials,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let mut env_secret_fallbacks = HashMap::new();
+        env_secret_fallbacks.insert("slack_bot_token".to_string(), "SLACK_BOT_TOKEN".to_string());
+
+        let result =
+            super::resolve_host_credentials(&caps, None, "user1", None, &env_secret_fallbacks)
+                .await;
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(
+            result[0].headers.get("Authorization"),
+            Some(&"Bearer xoxb-env-fallback".to_string())
+        );
+    }
+
+    #[tokio::test]
     async fn test_resolve_host_credentials_owner_scope_bearer() {
         use crate::secrets::{
             CreateSecretParams, CredentialLocation, CredentialMapping, SecretsStore,
         };
         use crate::tools::wasm::capabilities::HttpCapability;
-        use crate::tools::wasm::wrapper::resolve_host_credentials;
-
         let store = test_secrets_store();
         let ctx = JobContext::with_user("owner-scope", "owner-scope test", "owner-scope test");
 
@@ -2353,7 +2522,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = resolve_host_credentials(&caps, Some(&store), &ctx.user_id, None).await;
+        let result = resolve_host_credentials_no_env(&caps, Some(&store), &ctx.user_id, None).await;
         assert_eq!(result.len(), 1);
         assert_eq!(
             result[0].headers.get("Authorization"),
@@ -2414,8 +2583,6 @@ mod tests {
     async fn test_resolve_host_credentials_missing_secret() {
         use crate::secrets::{CredentialLocation, CredentialMapping};
         use crate::tools::wasm::capabilities::HttpCapability;
-        use crate::tools::wasm::wrapper::resolve_host_credentials;
-
         let store = test_secrets_store();
 
         // No secret stored, should silently skip
@@ -2437,7 +2604,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = resolve_host_credentials(&caps, Some(&store), "user1", None).await;
+        let result = resolve_host_credentials_no_env(&caps, Some(&store), "user1", None).await;
         assert!(result.is_empty());
     }
 
@@ -2447,7 +2614,7 @@ mod tests {
             CreateSecretParams, CredentialLocation, CredentialMapping, SecretsStore,
         };
         use crate::tools::wasm::capabilities::HttpCapability;
-        use crate::tools::wasm::wrapper::{OAuthRefreshConfig, resolve_host_credentials};
+        use crate::tools::wasm::wrapper::OAuthRefreshConfig;
 
         let store = test_secrets_store();
 
@@ -2492,7 +2659,8 @@ mod tests {
 
         // Should resolve the existing fresh token without attempting refresh
         let result =
-            resolve_host_credentials(&caps, Some(&store), "user1", Some(&oauth_config)).await;
+            resolve_host_credentials_no_env(&caps, Some(&store), "user1", Some(&oauth_config))
+                .await;
         assert_eq!(result.len(), 1);
         assert_eq!(
             result[0].headers.get("Authorization"),
@@ -2506,8 +2674,6 @@ mod tests {
             CreateSecretParams, CredentialLocation, CredentialMapping, SecretsStore,
         };
         use crate::tools::wasm::capabilities::HttpCapability;
-        use crate::tools::wasm::wrapper::resolve_host_credentials;
-
         let store = test_secrets_store();
 
         // Store an expired token
@@ -2539,7 +2705,7 @@ mod tests {
         };
 
         // No OAuth config, expired token can't be resolved (get_decrypted returns Expired)
-        let result = resolve_host_credentials(&caps, Some(&store), "user1", None).await;
+        let result = resolve_host_credentials_no_env(&caps, Some(&store), "user1", None).await;
         assert!(result.is_empty());
     }
 
@@ -2549,7 +2715,7 @@ mod tests {
             CreateSecretParams, CredentialLocation, CredentialMapping, SecretsStore,
         };
         use crate::tools::wasm::capabilities::HttpCapability;
-        use crate::tools::wasm::wrapper::{OAuthRefreshConfig, resolve_host_credentials};
+        use crate::tools::wasm::wrapper::OAuthRefreshConfig;
 
         let store = test_secrets_store();
 
@@ -2592,7 +2758,8 @@ mod tests {
 
         // Should use the legacy token directly without attempting refresh
         let result =
-            resolve_host_credentials(&caps, Some(&store), "user1", Some(&oauth_config)).await;
+            resolve_host_credentials_no_env(&caps, Some(&store), "user1", Some(&oauth_config))
+                .await;
         assert_eq!(result.len(), 1);
         assert_eq!(
             result[0].headers.get("Authorization"),
@@ -2607,7 +2774,7 @@ mod tests {
             CreateSecretParams, CredentialLocation, CredentialMapping, SecretsStore,
         };
         use crate::tools::wasm::capabilities::HttpCapability;
-        use crate::tools::wasm::wrapper::{OAuthRefreshConfig, resolve_host_credentials};
+        use crate::tools::wasm::wrapper::OAuthRefreshConfig;
 
         let proxy = MockProxyServer::start().await;
         let store = test_secrets_store();
@@ -2657,7 +2824,8 @@ mod tests {
         };
 
         let resolved =
-            resolve_host_credentials(&caps, Some(&store), "user1", Some(&oauth_config)).await;
+            resolve_host_credentials_no_env(&caps, Some(&store), "user1", Some(&oauth_config))
+                .await;
         assert_eq!(resolved.len(), 1);
         assert_eq!(
             resolved[0].headers.get("Authorization"),
@@ -2717,7 +2885,7 @@ mod tests {
             CreateSecretParams, CredentialLocation, CredentialMapping, SecretsStore,
         };
         use crate::tools::wasm::capabilities::HttpCapability;
-        use crate::tools::wasm::wrapper::{OAuthRefreshConfig, resolve_host_credentials};
+        use crate::tools::wasm::wrapper::OAuthRefreshConfig;
 
         let store = RecordingSecretsStore::new();
 
@@ -2766,7 +2934,8 @@ mod tests {
         };
 
         let resolved =
-            resolve_host_credentials(&caps, Some(&store), "user1", Some(&oauth_config)).await;
+            resolve_host_credentials_no_env(&caps, Some(&store), "user1", Some(&oauth_config))
+                .await;
         assert!(resolved.is_empty());
 
         let lookups = store.decrypted_lookups();
@@ -2784,7 +2953,7 @@ mod tests {
             CreateSecretParams, CredentialLocation, CredentialMapping, SecretsStore,
         };
         use crate::tools::wasm::capabilities::HttpCapability;
-        use crate::tools::wasm::wrapper::{OAuthRefreshConfig, resolve_host_credentials};
+        use crate::tools::wasm::wrapper::OAuthRefreshConfig;
 
         let store = RecordingSecretsStore::new();
 
@@ -2833,7 +3002,8 @@ mod tests {
         };
 
         let resolved =
-            resolve_host_credentials(&caps, Some(&store), "user1", Some(&oauth_config)).await;
+            resolve_host_credentials_no_env(&caps, Some(&store), "user1", Some(&oauth_config))
+                .await;
         assert!(resolved.is_empty());
 
         let lookups = store.decrypted_lookups();
@@ -3020,8 +3190,6 @@ mod tests {
     async fn test_resolve_host_credentials_fallback_to_default_user() {
         use crate::secrets::{CredentialLocation, CredentialMapping, SecretsStore};
         use crate::tools::wasm::capabilities::HttpCapability;
-        use crate::tools::wasm::wrapper::resolve_host_credentials;
-
         let store = test_secrets_store();
 
         // Store a token under the "default" global user
@@ -3057,7 +3225,8 @@ mod tests {
 
         // Resolve credentials for a different user (routine context)
         // Should fallback to "default" and find the token
-        let result = resolve_host_credentials(&caps, Some(&store), "routine_user_123", None).await;
+        let result =
+            resolve_host_credentials_no_env(&caps, Some(&store), "routine_user_123", None).await;
 
         assert!(!result.is_empty(), "fallback to default"); // safety: test code only
         assert_eq!(result[0].secret_value, "global_token_value"); // safety: test code only
@@ -3092,8 +3261,6 @@ mod tests {
     #[tokio::test]
     async fn test_resolve_host_credentials_prefers_user_specific_over_default() {
         use crate::secrets::SecretsStore;
-        use crate::tools::wasm::wrapper::resolve_host_credentials;
-
         let store = test_secrets_store();
 
         // Store token under "default" (global)
@@ -3122,7 +3289,7 @@ mod tests {
 
         // Resolve credentials for user_123
         // Should prefer user_123's token over default
-        let result = resolve_host_credentials(&caps, Some(&store), "user_123", None).await;
+        let result = resolve_host_credentials_no_env(&caps, Some(&store), "user_123", None).await;
 
         assert!(!result.is_empty(), "has user credentials"); // safety: test code only
         assert_eq!(result[0].secret_value, "user_specific_token", "user token"); // safety: test code only
@@ -3131,8 +3298,6 @@ mod tests {
     #[tokio::test]
     async fn test_resolve_host_credentials_no_fallback_when_already_default() {
         use crate::secrets::SecretsStore;
-        use crate::tools::wasm::wrapper::resolve_host_credentials;
-
         let store = test_secrets_store();
 
         // Only store token under "default" (not a duplicate)
@@ -3149,7 +3314,7 @@ mod tests {
 
         // Resolve credentials for "default" user
         // Should NOT attempt fallback (already looking up default)
-        let result = resolve_host_credentials(&caps, Some(&store), "default", None).await;
+        let result = resolve_host_credentials_no_env(&caps, Some(&store), "default", None).await;
 
         assert!(!result.is_empty(), "Should find default token"); // safety: test code only
         assert_eq!(result[0].secret_value, "default_token"); // safety: test code only
@@ -3157,8 +3322,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_resolve_host_credentials_missing_secret_warns() {
-        use crate::tools::wasm::wrapper::resolve_host_credentials;
-
         let store = test_secrets_store();
 
         // Don't store any token
@@ -3167,7 +3330,7 @@ mod tests {
         let caps = test_capabilities_with_google_oauth();
 
         // Resolve credentials when neither user nor default has the token
-        let result = resolve_host_credentials(&caps, Some(&store), "user_456", None).await;
+        let result = resolve_host_credentials_no_env(&caps, Some(&store), "user_456", None).await;
 
         // Should return empty since credential can't be found anywhere
         assert!(result.is_empty(), "no credentials found"); // safety: test code only

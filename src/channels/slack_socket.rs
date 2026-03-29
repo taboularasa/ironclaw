@@ -497,9 +497,24 @@ impl SlackSocketChannel {
         }
 
         let cleaned_text = strip_bot_mention(&text);
+        if let Some(thread_ts) = event.thread_ts.as_deref() {
+            tracing::info!(
+                channel = %channel,
+                thread_ts,
+                message_ts = %ts,
+                "slack_socket: received threaded message"
+            );
+        }
         let enriched_text = self
             .enrich_with_thread_context(&channel, event.thread_ts.as_deref(), &ts, &cleaned_text)
             .await;
+        tracing::info!(
+            channel = %channel,
+            message_ts = %ts,
+            content_length = enriched_text.len(),
+            has_thread_prefix = enriched_text.contains("Recent Slack thread context:"),
+            "slack_socket: emitting message"
+        );
         let thread_ts = event.thread_ts.clone().or_else(|| Some(ts.clone()));
         let placeholder_ts = match self
             .chat_post_message(&channel, "Working :gear:...", thread_ts.as_deref(), None)
@@ -707,15 +722,42 @@ impl SlackSocketChannel {
         cleaned_text: &str,
     ) -> String {
         let Some(thread_ts) = actual_thread_ts else {
+            tracing::info!(
+                channel = %channel_id,
+                message_ts = %current_ts,
+                "slack_socket: skipping thread context fetch because message is not in a thread"
+            );
             return cleaned_text.to_string();
         };
 
+        tracing::info!(
+            channel = %channel_id,
+            thread_ts,
+            "slack_socket: fetching thread context"
+        );
         let replies = match self
             .get_thread_replies(channel_id, thread_ts, THREAD_CONTEXT_MESSAGE_LIMIT + 4)
             .await
         {
-            Ok(replies) => replies,
+            Ok(replies) => {
+                tracing::info!(
+                    channel = %channel_id,
+                    thread_ts,
+                    ok = true,
+                    messages = replies.len(),
+                    "slack_socket: thread context fetch result"
+                );
+                replies
+            }
             Err(e) => {
+                tracing::info!(
+                    channel = %channel_id,
+                    thread_ts,
+                    ok = false,
+                    messages = 0usize,
+                    error = %e,
+                    "slack_socket: thread context fetch result"
+                );
                 tracing::warn!(
                     error = %e,
                     channel = %channel_id,
@@ -996,6 +1038,10 @@ impl Channel for SlackSocketChannel {
         &self,
         metadata: &serde_json::Value,
     ) -> std::collections::HashMap<String, String> {
+        tracing::info!(
+            metadata = %metadata,
+            "slack_socket conversation_context: metadata"
+        );
         let mut context = HashMap::new();
         if let Some(sender_id) = metadata.get("sender_id").and_then(|value| value.as_str()) {
             context.insert("sender_uuid".to_string(), sender_id.to_string());
@@ -1003,7 +1049,16 @@ impl Channel for SlackSocketChannel {
         if let Some(channel_id) = metadata.get("channel").and_then(|value| value.as_str()) {
             context.insert("group".to_string(), channel_id.to_string());
         }
+        if let Some(thread_ts) = metadata.get("thread_ts").and_then(|value| value.as_str()) {
+            context.insert("thread_ts".to_string(), thread_ts.to_string());
+        } else if let Some(thread_id) = metadata.get("thread_id").and_then(|value| value.as_str()) {
+            context.insert("thread_ts".to_string(), thread_id.to_string());
+        }
         context.insert("platform".to_string(), CHANNEL_NAME.to_string());
+        tracing::info!(
+            ctx = ?context,
+            "slack_socket conversation_context: returning ctx"
+        );
         context
     }
 
@@ -1210,7 +1265,11 @@ fn status_text_for_slack(status: &StatusUpdate) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{SlackReplyMessage, format_thread_context, truncate_slack_context_text};
+    use super::{
+        SlackReplyMessage, SlackSocketChannel, format_thread_context, truncate_slack_context_text,
+    };
+    use crate::channels::Channel;
+    use crate::config::SlackSocketConfig;
 
     #[test]
     fn thread_context_skips_current_message() {
@@ -1240,5 +1299,32 @@ mod tests {
     fn truncate_context_collapses_whitespace() {
         let text = truncate_slack_context_text("hello\n\nworld   from   slack", 11);
         assert_eq!(text, "hello world...");
+    }
+
+    #[test]
+    fn conversation_context_includes_thread_ts() {
+        let channel = SlackSocketChannel::new(SlackSocketConfig {
+            app_token: "xapp-test".to_string(),
+            bot_token: "xoxb-test".to_string(),
+            signing_secret: String::new(),
+            bot_user_id: None,
+        })
+        .expect("SlackSocketChannel should build in tests");
+
+        let metadata = serde_json::json!({
+            "sender_id": "U123",
+            "channel": "C123",
+            "thread_ts": "1774765635.494569"
+        });
+
+        let context = Channel::conversation_context(&channel, &metadata);
+
+        assert_eq!(context.get("sender_uuid").map(String::as_str), Some("U123"));
+        assert_eq!(context.get("group").map(String::as_str), Some("C123"));
+        assert_eq!(
+            context.get("thread_ts").map(String::as_str),
+            Some("1774765635.494569")
+        );
+        assert_eq!(context.get("platform").map(String::as_str), Some("slack"));
     }
 }

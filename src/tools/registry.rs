@@ -680,6 +680,14 @@ impl ToolRegistry {
         if let Some(oauth) = reg.oauth_refresh {
             wrapper = wrapper.with_oauth_refresh(oauth);
         }
+        if !reg.env_secret_fallbacks.is_empty() {
+            tracing::info!(
+                tool = %reg.name,
+                env_secret_fallbacks = ?reg.env_secret_fallbacks,
+                "WASM credential injection: applying env secret fallbacks to wrapper"
+            );
+            wrapper = wrapper.with_env_secret_fallbacks(reg.env_secret_fallbacks);
+        }
 
         // Register the tool
         self.register(Arc::new(wrapper)).await;
@@ -750,6 +758,7 @@ impl ToolRegistry {
             schema: Some(tool_with_binary.tool.parameters_schema.clone()),
             secrets_store: self.secrets_store.clone(),
             oauth_refresh: None,
+            env_secret_fallbacks: HashMap::new(),
         })
         .await
         .map_err(WasmRegistrationError::Wasm)?;
@@ -795,6 +804,8 @@ pub struct WasmToolRegistration<'a> {
     pub secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
     /// OAuth refresh configuration for auto-refreshing expired tokens.
     pub oauth_refresh: Option<OAuthRefreshConfig>,
+    /// Explicit secret_name -> env var fallbacks from the capabilities auth block.
+    pub env_secret_fallbacks: HashMap<String, String>,
 }
 
 impl Default for ToolRegistry {

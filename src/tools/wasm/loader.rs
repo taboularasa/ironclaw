@@ -126,48 +126,55 @@ impl WasmToolLoader {
         // Read capabilities (optional) and extract OAuth refresh config
         // and tool description. Parameter schema is auto-derived from the
         // WASM module's schema() export (see WasmToolSchemas::compact_schema).
-        let (capabilities, oauth_refresh, description) = if let Some(cap_path) = capabilities_path {
-            if cap_path.exists() {
-                let cap_bytes = fs::read(cap_path).await?;
-                let cap_file = CapabilitiesFile::from_bytes(&cap_bytes)
-                    .map_err(|e| WasmLoadError::InvalidCapabilities(e.to_string()))?;
-                cap_file.validate(name);
+        let (capabilities, oauth_refresh, description, env_secret_fallbacks) =
+            if let Some(cap_path) = capabilities_path {
+                if cap_path.exists() {
+                    let cap_bytes = fs::read(cap_path).await?;
+                    let cap_file = CapabilitiesFile::from_bytes(&cap_bytes)
+                        .map_err(|e| WasmLoadError::InvalidCapabilities(e.to_string()))?;
+                    cap_file.validate(name);
 
-                // Check WIT version compatibility
-                check_wit_version_compat(
-                    name,
-                    cap_file.wit_version.as_deref(),
-                    crate::tools::wasm::WIT_TOOL_VERSION,
-                )?;
+                    // Check WIT version compatibility
+                    check_wit_version_compat(
+                        name,
+                        cap_file.wit_version.as_deref(),
+                        crate::tools::wasm::WIT_TOOL_VERSION,
+                    )?;
 
-                let caps = cap_file.to_capabilities();
-                let oauth = resolve_oauth_refresh_config(&cap_file);
-                let desc = cap_file.description.clone();
-                if desc.is_none() {
+                    let caps = cap_file.to_capabilities();
+                    let oauth = resolve_oauth_refresh_config(&cap_file);
+                    let desc = cap_file.description.clone();
+                    let env_fallbacks = resolve_env_secret_fallbacks(&cap_file);
+                    tracing::info!(
+                        tool = name,
+                        env_secret_fallbacks = ?env_fallbacks,
+                        "WASM credential injection: resolved env secret fallbacks from capabilities"
+                    );
+                    if desc.is_none() {
+                        tracing::warn!(
+                            tool = name,
+                            path = %cap_path.display(),
+                            "Capabilities file missing \"description\" field; \
+                             tool will use generic fallback description"
+                        );
+                    }
+                    (caps, oauth, desc, env_fallbacks)
+                } else {
                     tracing::warn!(
                         tool = name,
                         path = %cap_path.display(),
-                        "Capabilities file missing \"description\" field; \
-                         tool will use generic fallback description"
+                        "Capabilities file not found, using default (no permissions)"
                     );
+                    (Capabilities::default(), None, None, HashMap::new())
                 }
-                (caps, oauth, desc)
             } else {
                 tracing::warn!(
                     tool = name,
-                    path = %cap_path.display(),
-                    "Capabilities file not found, using default (no permissions)"
-                );
-                (Capabilities::default(), None, None)
-            }
-        } else {
-            tracing::warn!(
-                tool = name,
-                "No capabilities file for WASM tool; \
+                    "No capabilities file for WASM tool; \
                      tool will use generic fallback description"
-            );
-            (Capabilities::default(), None, None)
-        };
+                );
+                (Capabilities::default(), None, None, HashMap::new())
+            };
 
         // Register the tool
         self.registry
@@ -181,6 +188,7 @@ impl WasmToolLoader {
                 schema: None,
                 secrets_store: self.secrets_store.clone(),
                 oauth_refresh,
+                env_secret_fallbacks,
             })
             .await?;
 
@@ -457,6 +465,23 @@ fn resolve_oauth_refresh_config(cap_file: &CapabilitiesFile) -> Option<OAuthRefr
         secret_name: auth.secret_name.clone(),
         provider: auth.provider.clone(),
     })
+}
+
+fn resolve_env_secret_fallbacks(cap_file: &CapabilitiesFile) -> HashMap<String, String> {
+    let mut fallbacks = HashMap::new();
+
+    if let Some(auth) = &cap_file.auth
+        && !auth.secret_name.trim().is_empty()
+        && let Some(env_var) = auth
+            .env_var
+            .as_ref()
+            .map(|v| v.trim())
+            .filter(|v| !v.is_empty())
+    {
+        fallbacks.insert(auth.secret_name.clone(), env_var.to_string());
+    }
+
+    fallbacks
 }
 
 /// Results from loading multiple tools.
