@@ -22,23 +22,25 @@ impl JobStore for LibSqlBackend {
         let conn = self.connect().await?;
         let status = ctx.state.to_string();
         let estimated_time_secs = ctx.estimated_duration.map(|d| d.as_secs() as i64);
+        let project_dir = ctx.metadata.get("project_dir").and_then(|v| v.as_str());
 
         conn
             .execute(
                 r#"
                 INSERT INTO agent_jobs (
                     id, conversation_id, title, description, category, status, source,
-                    user_id,
+                    user_id, project_dir,
                     budget_amount, budget_token, bid_amount, estimated_cost, estimated_time_secs,
                     actual_cost, repair_attempts, max_tokens, total_tokens_used,
                     created_at, started_at, completed_at
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)
                 ON CONFLICT (id) DO UPDATE SET
                     title = excluded.title,
                     description = excluded.description,
                     category = excluded.category,
                     status = excluded.status,
                     user_id = excluded.user_id,
+                    project_dir = excluded.project_dir,
                     estimated_cost = excluded.estimated_cost,
                     estimated_time_secs = excluded.estimated_time_secs,
                     actual_cost = excluded.actual_cost,
@@ -57,6 +59,7 @@ impl JobStore for LibSqlBackend {
                     status,
                     "direct",
                     ctx.user_id.as_str(),
+                    opt_text(project_dir),
                     opt_text_owned(ctx.budget.map(|d| d.to_string())),
                     opt_text(ctx.budget_token.as_deref()),
                     opt_text_owned(ctx.bid_amount.map(|d| d.to_string())),
@@ -81,7 +84,7 @@ impl JobStore for LibSqlBackend {
         let mut rows = conn
             .query(
                 r#"
-                SELECT id, conversation_id, title, description, category, status, user_id,
+                SELECT id, conversation_id, title, description, category, status, user_id, project_dir,
                        budget_amount, budget_token, bid_amount, estimated_cost, estimated_time_secs,
                        actual_cost, repair_attempts, max_tokens, total_tokens_used,
                        created_at, started_at, completed_at
@@ -100,7 +103,8 @@ impl JobStore for LibSqlBackend {
             Some(row) => {
                 let status_str = get_text(&row, 5);
                 let state = parse_job_state(&status_str);
-                let estimated_time_secs: Option<i64> = row.get::<i64>(11).ok();
+                let estimated_time_secs: Option<i64> = row.get::<i64>(12).ok();
+                let project_dir = get_opt_text(&row, 7);
 
                 Ok(Some(JobContext {
                     job_id: get_text(&row, 0).parse().unwrap_or_default(),
@@ -111,21 +115,23 @@ impl JobStore for LibSqlBackend {
                     title: get_text(&row, 2),
                     description: get_text(&row, 3),
                     category: get_opt_text(&row, 4),
-                    budget: get_opt_decimal(&row, 7),
-                    budget_token: get_opt_text(&row, 8),
-                    bid_amount: get_opt_decimal(&row, 9),
-                    estimated_cost: get_opt_decimal(&row, 10),
+                    budget: get_opt_decimal(&row, 8),
+                    budget_token: get_opt_text(&row, 9),
+                    bid_amount: get_opt_decimal(&row, 10),
+                    estimated_cost: get_opt_decimal(&row, 11),
                     estimated_duration: estimated_time_secs
                         .map(|s| std::time::Duration::from_secs(s as u64)),
-                    actual_cost: get_decimal(&row, 12),
-                    max_tokens: get_i64(&row, 14) as u64,
-                    total_tokens_used: get_i64(&row, 15) as u64,
-                    repair_attempts: get_i64(&row, 13) as u32,
-                    created_at: get_ts(&row, 16),
-                    started_at: get_opt_ts(&row, 17),
-                    completed_at: get_opt_ts(&row, 18),
+                    actual_cost: get_decimal(&row, 13),
+                    max_tokens: get_i64(&row, 15) as u64,
+                    total_tokens_used: get_i64(&row, 16) as u64,
+                    repair_attempts: get_i64(&row, 14) as u32,
+                    created_at: get_ts(&row, 17),
+                    started_at: get_opt_ts(&row, 18),
+                    completed_at: get_opt_ts(&row, 19),
                     transitions: Vec::new(),
-                    metadata: serde_json::Value::Null,
+                    metadata: project_dir
+                        .map(|dir| serde_json::json!({ "project_dir": dir }))
+                        .unwrap_or(serde_json::Value::Null),
                     extra_env: std::sync::Arc::new(std::collections::HashMap::new()),
                     http_interceptor: None,
                     tool_output_stash: std::sync::Arc::new(tokio::sync::RwLock::new(

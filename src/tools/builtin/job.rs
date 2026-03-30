@@ -6,7 +6,7 @@
 //! - Check job status
 //! - Cancel running jobs
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -82,6 +82,8 @@ pub struct CreateJobTool {
     context_manager: Arc<ContextManager>,
     /// Lazy scheduler for dispatching local (non-sandbox) jobs.
     scheduler_slot: Option<SchedulerSlot>,
+    /// Whether local host dev tools are available for agent jobs.
+    allow_host_project_dirs: bool,
     job_manager: Option<Arc<ContainerJobManager>>,
     store: Option<Arc<dyn Database>>,
     /// Broadcast sender for job events (used to subscribe a monitor).
@@ -97,6 +99,7 @@ impl CreateJobTool {
         Self {
             context_manager,
             scheduler_slot: None,
+            allow_host_project_dirs: false,
             job_manager: None,
             store: None,
             event_tx: None,
@@ -134,6 +137,13 @@ impl CreateJobTool {
         self
     }
 
+    /// Allow `project_dir` paths outside `~/.ironclaw/projects/` to run as
+    /// local worker jobs instead of sandbox containers.
+    pub fn with_host_project_dirs(mut self, allow: bool) -> Self {
+        self.allow_host_project_dirs = allow;
+        self
+    }
+
     /// Inject secrets store for credential validation.
     pub fn with_secrets(mut self, secrets: Arc<dyn SecretsStore + Send + Sync>) -> Self {
         self.secrets_store = Some(secrets);
@@ -142,6 +152,10 @@ impl CreateJobTool {
 
     pub fn sandbox_enabled(&self) -> bool {
         self.job_manager.is_some()
+    }
+
+    fn host_project_dirs_supported(&self) -> bool {
+        self.allow_host_project_dirs && self.scheduler_slot.is_some()
     }
 
     /// Parse and validate the `credentials` parameter.
@@ -290,15 +304,118 @@ impl CreateJobTool {
         }
     }
 
+    fn local_job_metadata(
+        &self,
+        ctx: &JobContext,
+        project_dir: Option<&Path>,
+    ) -> Option<serde_json::Value> {
+        let mut metadata = ctx
+            .metadata
+            .as_object()
+            .cloned()
+            .unwrap_or_else(serde_json::Map::new);
+
+        if let Some(project_dir) = project_dir {
+            metadata.insert(
+                "project_dir".to_string(),
+                serde_json::Value::String(project_dir.display().to_string()),
+            );
+        }
+
+        if metadata.is_empty() {
+            None
+        } else {
+            Some(serde_json::Value::Object(metadata))
+        }
+    }
+
+    async fn local_job_completion_message(&self, job_id: Uuid) -> String {
+        if let Some(store) = self.store.clone()
+            && let Ok(events) = store.list_job_events(job_id, Some(20)).await
+        {
+            for event in events.iter().rev() {
+                if event.event_type == "result"
+                    && let Some(message) = event.data.get("message").and_then(|v| v.as_str())
+                    && !message.trim().is_empty()
+                {
+                    return message.to_string();
+                }
+
+                if event.event_type == "message"
+                    && event.data.get("role").and_then(|v| v.as_str()) == Some("assistant")
+                    && let Some(content) = event.data.get("content").and_then(|v| v.as_str())
+                    && !content.trim().is_empty()
+                {
+                    return content.to_string();
+                }
+            }
+        }
+
+        "Local job completed".to_string()
+    }
+
+    async fn wait_for_local_job(&self, job_id: Uuid) -> Result<String, ToolError> {
+        let timeout = Duration::from_secs(600);
+        let poll_interval = Duration::from_secs(1);
+        let deadline = tokio::time::Instant::now() + timeout;
+
+        loop {
+            if tokio::time::Instant::now() > deadline {
+                return Err(ToolError::ExecutionFailed(
+                    "local job execution timed out (10 minutes)".to_string(),
+                ));
+            }
+
+            let ctx = self
+                .context_manager
+                .get_context(job_id)
+                .await
+                .map_err(|e| {
+                    ToolError::ExecutionFailed(format!("failed to load local job context: {}", e))
+                })?;
+
+            let reason = ctx
+                .transitions
+                .last()
+                .and_then(|transition| transition.reason.clone());
+
+            match ctx.state {
+                JobState::Completed => {
+                    return Ok(self.local_job_completion_message(job_id).await);
+                }
+                JobState::Failed | JobState::Cancelled => {
+                    return Err(ToolError::ExecutionFailed(
+                        reason.unwrap_or_else(|| "local job failed".to_string()),
+                    ));
+                }
+                JobState::Stuck => {
+                    return Err(ToolError::ExecutionFailed(
+                        reason.unwrap_or_else(|| "local job became stuck".to_string()),
+                    ));
+                }
+                JobState::Pending
+                | JobState::InProgress
+                | JobState::Submitted
+                | JobState::Accepted => {
+                    tokio::time::sleep(poll_interval).await;
+                }
+            }
+        }
+    }
+
     /// Execute via Scheduler (persists to DB + spawns worker), or fall back to
     /// ContextManager-only if the scheduler isn't available yet.
     async fn execute_local(
         &self,
         title: &str,
         description: &str,
+        project_dir: Option<&Path>,
+        wait: bool,
         ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
+        let metadata = self.local_job_metadata(ctx, project_dir);
+        let project_dir_str = project_dir.map(|dir| dir.display().to_string());
 
         // Use the scheduler if available — creates in ContextManager, persists
         // to DB, transitions to InProgress, and spawns a worker. The new job
@@ -309,15 +426,28 @@ impl CreateJobTool {
             && let Some(ref scheduler) = *slot.read().await
         {
             return match scheduler
-                .dispatch_job(&ctx.user_id, title, description, None)
+                .dispatch_job(&ctx.user_id, title, description, metadata)
                 .await
             {
                 Ok(job_id) => {
+                    if wait {
+                        let output = self.wait_for_local_job(job_id).await?;
+                        let result = serde_json::json!({
+                            "job_id": job_id.to_string(),
+                            "title": title,
+                            "status": "completed",
+                            "output": output,
+                            "project_dir": project_dir_str.clone(),
+                        });
+                        return Ok(ToolOutput::success(result, start.elapsed()));
+                    }
+
                     let result = serde_json::json!({
                         "job_id": job_id.to_string(),
                         "title": title,
                         "status": "in_progress",
-                        "message": format!("Created and scheduled job '{}'", title)
+                        "message": format!("Created and scheduled job '{}'", title),
+                        "project_dir": project_dir_str.clone(),
                     });
                     Ok(ToolOutput::success(result, start.elapsed()))
                 }
@@ -341,7 +471,8 @@ impl CreateJobTool {
                     "job_id": job_id.to_string(),
                     "title": title,
                     "status": "pending",
-                    "message": format!("Created job '{}' (not scheduled — scheduler unavailable)", title)
+                    "message": format!("Created job '{}' (not scheduled — scheduler unavailable)", title),
+                    "project_dir": project_dir_str,
                 });
                 Ok(ToolOutput::success(result, start.elapsed()))
             }
@@ -695,6 +826,36 @@ fn projects_base() -> PathBuf {
     ironclaw_base_dir().join("projects")
 }
 
+/// Check whether an explicit project directory lives under
+/// `~/.ironclaw/projects/` after canonicalization.
+///
+/// Explicit paths must already exist. This matches the sandbox contract for
+/// `project_dir` reuse while letting the caller decide whether to route host
+/// directories to a local worker instead of a sandbox container.
+fn explicit_project_dir_is_managed(dir: &Path) -> Result<bool, ToolError> {
+    let canonical = dir.canonicalize().map_err(|e| {
+        ToolError::InvalidParameters(format!(
+            "explicit project dir {} does not exist or is inaccessible: {}",
+            dir.display(),
+            e
+        ))
+    })?;
+
+    let base = projects_base();
+    std::fs::create_dir_all(&base).map_err(|e| {
+        ToolError::ExecutionFailed(format!(
+            "failed to create projects base {}: {}",
+            base.display(),
+            e
+        ))
+    })?;
+    let canonical_base = base.canonicalize().map_err(|e| {
+        ToolError::ExecutionFailed(format!("failed to canonicalize projects base: {}", e))
+    })?;
+
+    Ok(canonical.starts_with(&canonical_base))
+}
+
 /// Resolve the project directory, creating it if it doesn't exist.
 ///
 /// Auto-creates `~/.ironclaw/projects/{project_id}/` so every sandbox job has a
@@ -877,14 +1038,18 @@ impl Tool for CreateJobTool {
         if self.sandbox_enabled() {
             "Create and execute a job. The job runs in a sandboxed Docker container with its own \
              sub-agent that has shell, file read/write, list_dir, and apply_patch tools. Use this \
-             whenever the user asks you to build, create, or work on something. The task \
+             for long-running background work, explicit sandboxing, or isolated sub-agent tasks. \
+             When direct host tools are available and the task is about an existing host checkout, \
+             prefer direct host tools unless the user explicitly wants a separate job. The task \
              description should be detailed enough for the sub-agent to work independently. \
              IMPORTANT: jobs are isolated containers and do NOT automatically inherit the host's \
              existing CLI logins, keychains, SSH agents, git config, or user-scoped credentials \
              such as GitHub auth. If the task depends on the current host environment, local \
              checkouts, Docker state, or existing authenticated CLIs and full_access host tools \
-             are available, prefer direct host tools instead of create_job. Use create_job when \
-             you specifically want isolation, a background task, or an explicit sandbox. Set \
+             are available, prefer direct host tools instead of create_job. If you pass \
+             project_dir outside ~/.ironclaw/projects/ and local host tools are enabled, the job \
+             runs as a local worker job in worker mode instead of a sandbox container. Use \
+             create_job when you specifically want isolation, a background task, or an explicit sandbox. Set \
              wait=false to start immediately while continuing the conversation. Set mode \
              to 'claude_code' for complex software engineering tasks, but only when Claude auth \
              is configured for the job environment."
@@ -920,8 +1085,11 @@ impl Tool for CreateJobTool {
                     },
                     "project_dir": {
                         "type": "string",
-                        "description": "Path to an existing project directory to mount into the container. \
-                                        Must be under ~/.ironclaw/projects/. If omitted, a fresh directory is created."
+                        "description": "Path to an existing project directory. Paths under ~/.ironclaw/projects/ \
+                                        are mounted into sandbox containers. When local host tools are enabled, \
+                                        an existing path outside that base runs the job locally in worker mode \
+                                        and becomes the default repo root for shell/file tools. claude_code mode \
+                                        still requires a sandbox project under ~/.ironclaw/projects/."
                     },
                     "credentials": {
                         "type": "object",
@@ -986,6 +1154,35 @@ impl Tool for CreateJobTool {
                 .and_then(|v| v.as_str())
                 .map(PathBuf::from);
 
+            if let Some(ref dir) = explicit_dir
+                && !explicit_project_dir_is_managed(dir)?
+            {
+                if mode == JobMode::ClaudeCode {
+                    return Err(ToolError::InvalidParameters(
+                        "host project directories outside ~/.ironclaw/projects are only supported in worker mode".to_string(),
+                    ));
+                }
+                let requested_credentials = params
+                    .get("credentials")
+                    .and_then(|value| value.as_object())
+                    .is_some_and(|object| !object.is_empty());
+                if requested_credentials {
+                    return Err(ToolError::InvalidParameters(
+                        "credentials are only supported for sandbox jobs under ~/.ironclaw/projects".to_string(),
+                    ));
+                }
+                if self.host_project_dirs_supported() {
+                    return self
+                        .execute_local(title, description, Some(dir.as_path()), wait, ctx)
+                        .await;
+                }
+                return Err(ToolError::InvalidParameters(format!(
+                    "project directory {} is outside {}. Host project directories require local host tools to be enabled.",
+                    dir.display(),
+                    projects_base().display()
+                )));
+            }
+
             // Parse and validate credential grants
             let credential_grants = self.parse_credentials(&params, &ctx.user_id).await?;
 
@@ -994,7 +1191,8 @@ impl Tool for CreateJobTool {
             self.execute_sandbox(&task, explicit_dir, wait, mode, credential_grants, ctx)
                 .await
         } else {
-            self.execute_local(title, description, ctx).await
+            self.execute_local(title, description, None, false, ctx)
+                .await
         }
     }
 
@@ -2047,6 +2245,76 @@ mod tests {
             props.contains_key("credentials"),
             "sandbox schema must expose credentials"
         );
+    }
+
+    #[tokio::test]
+    async fn test_create_job_accepts_host_project_dir_for_local_worker_mode() {
+        let manager = Arc::new(ContextManager::new(5));
+        let jm = Arc::new(ContainerJobManager::new(
+            crate::orchestrator::job_manager::ContainerJobConfig::default(),
+            crate::orchestrator::TokenStore::new(),
+        ));
+        let scheduler_slot: SchedulerSlot = Arc::new(tokio::sync::RwLock::new(None));
+        let tool = CreateJobTool::new(manager)
+            .with_scheduler_slot(scheduler_slot)
+            .with_host_project_dirs(true)
+            .with_sandbox(jm, None);
+
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = JobContext::default();
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "title": "Host repo job",
+                    "description": "Run against a host checkout",
+                    "project_dir": tmp.path().display().to_string(),
+                    "wait": false
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            result.result.get("status").and_then(|v| v.as_str()),
+            Some("pending")
+        );
+        assert_eq!(
+            result.result.get("project_dir").and_then(|v| v.as_str()),
+            Some(tmp.path().to_str().unwrap())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_job_rejects_host_project_dir_for_claude_code_mode() {
+        let manager = Arc::new(ContextManager::new(5));
+        let jm = Arc::new(ContainerJobManager::new(
+            crate::orchestrator::job_manager::ContainerJobConfig::default(),
+            crate::orchestrator::TokenStore::new(),
+        ));
+        let scheduler_slot: SchedulerSlot = Arc::new(tokio::sync::RwLock::new(None));
+        let tool = CreateJobTool::new(manager)
+            .with_scheduler_slot(scheduler_slot)
+            .with_host_project_dirs(true)
+            .with_sandbox(jm, None);
+
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = JobContext::default();
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "title": "Host repo job",
+                    "description": "Run against a host checkout",
+                    "project_dir": tmp.path().display().to_string(),
+                    "mode": "claude_code"
+                }),
+                &ctx,
+            )
+            .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("only supported in worker mode"));
     }
 
     #[tokio::test]

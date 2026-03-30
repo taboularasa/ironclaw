@@ -590,6 +590,7 @@ async fn async_main() -> anyhow::Result<()> {
     components.tools.register_job_tools(
         Arc::clone(&components.context_manager),
         Some(scheduler_slot.clone()),
+        config.agent.allow_local_tools,
         container_job_manager.clone(),
         components.db.clone(),
         job_event_tx.clone(),

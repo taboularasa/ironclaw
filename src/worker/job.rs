@@ -259,6 +259,13 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
             job_ctx.title, job_ctx.description
         )));
 
+        if let Some(project_dir) = job_ctx.metadata.get("project_dir").and_then(|v| v.as_str()) {
+            reason_ctx.messages.push(ChatMessage::system(format!(
+                "Host project directory: {}.\nUse this as the default working directory for shell commands and as the base path for relative file operations.",
+                project_dir
+            )));
+        }
+
         // Main execution loop with timeout
         let result = tokio::time::timeout(self.timeout(), async {
             self.execution_loop(&mut rx, &reasoning, &mut reason_ctx)

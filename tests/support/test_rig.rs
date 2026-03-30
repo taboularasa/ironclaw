@@ -625,6 +625,7 @@ impl TestRigBuilder {
             components.tools.register_job_tools(
                 Arc::clone(&components.context_manager),
                 Some(scheduler_slot.clone()),
+                true,
                 None,
                 components.db.clone(),
                 None,

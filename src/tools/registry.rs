@@ -380,6 +380,7 @@ impl ToolRegistry {
         &self,
         context_manager: Arc<ContextManager>,
         scheduler_slot: Option<crate::tools::builtin::SchedulerSlot>,
+        allow_local_dev_tools: bool,
         job_manager: Option<Arc<ContainerJobManager>>,
         store: Option<Arc<dyn Database>>,
         job_event_tx: Option<
@@ -393,6 +394,7 @@ impl ToolRegistry {
         if let Some(slot) = scheduler_slot {
             create_tool = create_tool.with_scheduler_slot(slot);
         }
+        create_tool = create_tool.with_host_project_dirs(allow_local_dev_tools);
         // Clone before moving into create_tool so cancel_job can also use them.
         let jm_for_cancel = job_manager.clone();
         let store_for_cancel = store.clone();

@@ -55,6 +55,7 @@ use tokio::process::Command;
 
 use crate::context::JobContext;
 use crate::sandbox::{SandboxManager, SandboxPolicy};
+use crate::tools::builtin::path_utils::metadata_project_dir;
 use crate::tools::tool::{
     ApprovalRequirement, RiskLevel, Tool, ToolDomain, ToolError, ToolOutput, require_str,
 };
@@ -195,6 +196,19 @@ const SAFE_ENV_VARS: &[&str] = &[
     "ProgramFiles",
     "ProgramFiles(x86)",
     "WINDIR",
+];
+
+/// Auth-related environment variables forwarded only for simple host-side
+/// git/github/ssh commands. These remain scrubbed for generic shell commands
+/// so `env` and similar utilities cannot dump credentials into model context.
+const GIT_AUTH_ENV_VARS: &[&str] = &[
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "SSH_AUTH_SOCK",
+    "SSH_AGENT_PID",
+    "GIT_SSH_COMMAND",
+    "GIT_ASKPASS",
+    "SSH_ASKPASS",
 ];
 
 /// Low-risk command prefixes: strictly read-only commands with no side effects.
@@ -542,6 +556,62 @@ fn has_command_token(lower: &str, token: &str) -> bool {
     false
 }
 
+fn contains_shell_control_operators(cmd: &str) -> bool {
+    ["&&", "||", "|", ";", "\n", "\r", "$(", "`"]
+        .iter()
+        .any(|op| cmd.contains(op))
+}
+
+fn command_program(cmd: &str) -> Option<&str> {
+    let trimmed = cmd.trim();
+    if trimmed.is_empty() || contains_shell_control_operators(trimmed) {
+        return None;
+    }
+
+    for token in trimmed.split_whitespace() {
+        // Allow inline env assignments like `GIT_OPTIONAL_LOCKS=0 git status`.
+        if token.contains('=')
+            && !token.starts_with('-')
+            && token
+                .chars()
+                .next()
+                .is_some_and(|ch| ch.is_ascii_alphabetic() || ch == '_')
+        {
+            continue;
+        }
+        return Some(token);
+    }
+
+    None
+}
+
+fn should_forward_git_auth(cmd: &str) -> bool {
+    matches!(command_program(cmd), Some("git" | "gh" | "ssh"))
+}
+
+fn build_direct_env(cmd: &str, extra_env: &HashMap<String, String>) -> HashMap<String, String> {
+    let mut env = HashMap::new();
+
+    for var in SAFE_ENV_VARS {
+        if let Ok(val) = std::env::var(var) {
+            env.insert((*var).to_string(), val);
+        }
+    }
+
+    if should_forward_git_auth(cmd) {
+        for var in GIT_AUTH_ENV_VARS {
+            if let Ok(val) = std::env::var(var)
+                && !val.trim().is_empty()
+            {
+                env.insert((*var).to_string(), val);
+            }
+        }
+    }
+
+    env.extend(extra_env.clone());
+    env
+}
+
 /// Shell command execution tool.
 pub struct ShellTool {
     /// Working directory for commands (if None, uses job's working dir or cwd).
@@ -675,20 +745,11 @@ impl ShellTool {
             c
         };
 
-        // Scrub environment to prevent secret leakage (CWE-200).
-        // Only forward known-safe variables; everything else (API keys,
-        // session tokens, credentials) is stripped from child processes.
         command.env_clear();
-        for var in SAFE_ENV_VARS {
-            if let Ok(val) = std::env::var(var) {
-                command.env(var, val);
-            }
-        }
-
-        // Inject extra environment variables (e.g., credentials fetched by the
-        // worker runtime) on top of the scrubbed base. These are explicitly
-        // provided by the orchestrator and are safe to forward.
-        command.envs(extra_env);
+        // Scrub environment to prevent secret leakage (CWE-200), but allow
+        // simple host-side git/github/ssh commands to inherit the daemon's
+        // auth env so private host repositories remain usable.
+        command.envs(build_direct_env(cmd, extra_env));
 
         command
             .current_dir(workdir)
@@ -869,7 +930,12 @@ impl Tool for ShellTool {
     ) -> Result<ToolOutput, ToolError> {
         let command = require_str(&params, "command")?;
 
-        let workdir = params.get("workdir").and_then(|v| v.as_str());
+        let project_dir =
+            metadata_project_dir(&ctx.metadata).map(|path| path.display().to_string());
+        let workdir = params
+            .get("workdir")
+            .and_then(|v| v.as_str())
+            .or(project_dir.as_deref());
         let timeout = params.get("timeout").and_then(|v| v.as_u64());
 
         let start = std::time::Instant::now();
@@ -1477,6 +1543,85 @@ mod tests {
             output.contains("PATH="),
             "PATH must be preserved in child env"
         );
+    }
+
+    #[tokio::test]
+    async fn test_execute_uses_job_project_dir_as_default_workdir() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool = ShellTool::new();
+        let ctx = JobContext {
+            metadata: serde_json::json!({
+                "project_dir": dir.path().display().to_string()
+            }),
+            ..Default::default()
+        };
+
+        let result = tool
+            .execute(serde_json::json!({"command": "pwd"}), &ctx)
+            .await
+            .unwrap();
+
+        let output = result.result.get("output").unwrap().as_str().unwrap();
+        assert!(
+            output.trim().ends_with(dir.path().to_str().unwrap()),
+            "expected pwd to use job project_dir, got: {}",
+            output
+        );
+    }
+
+    #[test]
+    fn test_build_direct_env_forwards_git_auth_for_simple_git_commands() {
+        // SAFETY: test-only env mutation.
+        unsafe {
+            std::env::set_var("GH_TOKEN", "gh_test_token");
+            std::env::set_var("SSH_AUTH_SOCK", "/tmp/test-agent.sock");
+        }
+
+        let env = build_direct_env("git fetch origin", &HashMap::new());
+        assert_eq!(
+            env.get("GH_TOKEN").map(String::as_str),
+            Some("gh_test_token")
+        );
+        assert_eq!(
+            env.get("SSH_AUTH_SOCK").map(String::as_str),
+            Some("/tmp/test-agent.sock")
+        );
+
+        // SAFETY: test-only env cleanup.
+        unsafe {
+            std::env::remove_var("GH_TOKEN");
+            std::env::remove_var("SSH_AUTH_SOCK");
+        }
+    }
+
+    #[test]
+    fn test_build_direct_env_hides_git_auth_for_non_git_commands() {
+        // SAFETY: test-only env mutation.
+        unsafe { std::env::set_var("GH_TOKEN", "gh_test_token") };
+
+        let env = build_direct_env("env", &HashMap::new());
+        assert!(
+            !env.contains_key("GH_TOKEN"),
+            "non-git commands must not inherit git auth env"
+        );
+
+        // SAFETY: test-only env cleanup.
+        unsafe { std::env::remove_var("GH_TOKEN") };
+    }
+
+    #[test]
+    fn test_build_direct_env_hides_git_auth_for_compound_commands() {
+        // SAFETY: test-only env mutation.
+        unsafe { std::env::set_var("GH_TOKEN", "gh_test_token") };
+
+        let env = build_direct_env("git status && env", &HashMap::new());
+        assert!(
+            !env.contains_key("GH_TOKEN"),
+            "compound commands must not inherit git auth env"
+        );
+
+        // SAFETY: test-only env cleanup.
+        unsafe { std::env::remove_var("GH_TOKEN") };
     }
 
     #[test]

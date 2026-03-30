@@ -181,6 +181,7 @@ impl GatewayWorkflowHarness {
         components.tools.register_job_tools(
             Arc::clone(&components.context_manager),
             None,
+            false,
             None,
             components.db.clone(),
             None,

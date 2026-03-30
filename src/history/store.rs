@@ -147,22 +147,24 @@ impl Store {
 
         let status = ctx.state.to_string();
         let estimated_time_secs = ctx.estimated_duration.map(|d| d.as_secs() as i32);
+        let project_dir = ctx.metadata.get("project_dir").and_then(|v| v.as_str());
 
         conn.execute(
             r#"
             INSERT INTO agent_jobs (
                 id, conversation_id, title, description, category, status, source,
-                user_id,
+                user_id, project_dir,
                 budget_amount, budget_token, bid_amount, estimated_cost, estimated_time_secs,
                 actual_cost, repair_attempts, max_tokens, total_tokens_used,
                 created_at, started_at, completed_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
             ON CONFLICT (id) DO UPDATE SET
                 title = EXCLUDED.title,
                 description = EXCLUDED.description,
                 category = EXCLUDED.category,
                 status = EXCLUDED.status,
                 user_id = EXCLUDED.user_id,
+                project_dir = EXCLUDED.project_dir,
                 estimated_cost = EXCLUDED.estimated_cost,
                 estimated_time_secs = EXCLUDED.estimated_time_secs,
                 actual_cost = EXCLUDED.actual_cost,
@@ -181,6 +183,7 @@ impl Store {
                 &status,
                 &"direct", // source
                 &ctx.user_id,
+                &project_dir,
                 &ctx.budget,
                 &ctx.budget_token,
                 &ctx.bid_amount,
@@ -207,7 +210,7 @@ impl Store {
         let row = conn
             .query_opt(
                 r#"
-                SELECT id, conversation_id, title, description, category, status, user_id,
+                SELECT id, conversation_id, title, description, category, status, user_id, project_dir,
                        budget_amount, budget_token, bid_amount, estimated_cost, estimated_time_secs,
                        actual_cost, repair_attempts, max_tokens, total_tokens_used,
                        created_at, started_at, completed_at
@@ -222,6 +225,7 @@ impl Store {
                 let status_str: String = row.get("status");
                 let state = parse_job_state(&status_str);
                 let estimated_time_secs: Option<i32> = row.get("estimated_time_secs");
+                let project_dir: Option<String> = row.get("project_dir");
 
                 Ok(Some(JobContext {
                     job_id: row.get("id"),
@@ -246,7 +250,9 @@ impl Store {
                     started_at: row.get("started_at"),
                     completed_at: row.get("completed_at"),
                     transitions: Vec::new(), // Not loaded from DB for now
-                    metadata: serde_json::Value::Null,
+                    metadata: project_dir
+                        .map(|dir| serde_json::json!({ "project_dir": dir }))
+                        .unwrap_or(serde_json::Value::Null),
                     max_tokens: row.get::<_, Option<i64>>("max_tokens").unwrap_or(0) as u64,
                     total_tokens_used: row.get::<_, Option<i64>>("total_tokens_used").unwrap_or(0)
                         as u64,
@@ -2366,6 +2372,53 @@ mod tests {
 
         // Clean up
         let conn = store.conn().await.unwrap();
+        conn.execute("DELETE FROM agent_jobs WHERE id = $1", &[&ctx.job_id])
+            .await
+            .unwrap();
+    }
+
+    /// Regression test: host-local jobs must persist and reload `project_dir`
+    /// so status/history surfaces reflect the actual repo root.
+    #[cfg(feature = "postgres")]
+    #[tokio::test]
+    #[ignore]
+    async fn test_save_job_persists_project_dir_metadata() {
+        use crate::config::Config;
+        use crate::context::JobContext;
+
+        let _ = dotenvy::dotenv();
+        let config = Config::from_env().await.expect("Failed to load config");
+        let store = Store::new(&config.database)
+            .await
+            .expect("Failed to connect to database");
+        store
+            .run_migrations()
+            .await
+            .expect("Failed to run migrations");
+
+        let mut ctx = JobContext::with_user("test-user-42", "PG project_dir test", "regression test");
+        ctx.metadata = serde_json::json!({
+            "project_dir": "/tmp/host-repo"
+        });
+        store.save_job(&ctx).await.unwrap();
+
+        let loaded = store.get_job(ctx.job_id).await.unwrap().unwrap();
+        assert_eq!(
+            loaded.metadata.get("project_dir").and_then(|v| v.as_str()),
+            Some("/tmp/host-repo")
+        );
+
+        let conn = store.conn().await.unwrap();
+        let row = conn
+            .query_one(
+                "SELECT project_dir FROM agent_jobs WHERE id = $1",
+                &[&ctx.job_id],
+            )
+            .await
+            .unwrap();
+        let persisted: Option<String> = row.get("project_dir");
+        assert_eq!(persisted.as_deref(), Some("/tmp/host-repo"));
+
         conn.execute("DELETE FROM agent_jobs WHERE id = $1", &[&ctx.job_id])
             .await
             .unwrap();

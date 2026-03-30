@@ -190,6 +190,17 @@ fn is_path_safe_minimal(path: &str) -> bool {
     true
 }
 
+/// Extract a `project_dir` string from tool/job metadata when present.
+///
+/// This is used by host-local jobs to tell filesystem and shell tools which
+/// repository root they should treat as the default working directory.
+pub fn metadata_project_dir(metadata: &serde_json::Value) -> Option<PathBuf> {
+    metadata
+        .get("project_dir")
+        .and_then(|value| value.as_str())
+        .map(PathBuf::from)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -216,6 +227,26 @@ mod tests {
     #[test]
     fn test_expand_tilde_no_op_relative() {
         assert_eq!(expand_tilde("foo/bar.txt"), "foo/bar.txt");
+    }
+
+    #[test]
+    fn test_metadata_project_dir_present() {
+        let metadata = serde_json::json!({
+            "project_dir": "/tmp/example"
+        });
+        assert_eq!(
+            metadata_project_dir(&metadata),
+            Some(PathBuf::from("/tmp/example"))
+        );
+    }
+
+    #[test]
+    fn test_metadata_project_dir_missing_or_non_string() {
+        assert_eq!(metadata_project_dir(&serde_json::Value::Null), None);
+        assert_eq!(
+            metadata_project_dir(&serde_json::json!({ "project_dir": 42 })),
+            None
+        );
     }
 
     #[test]

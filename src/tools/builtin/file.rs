@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use tokio::fs;
 
 use crate::context::JobContext;
-use crate::tools::builtin::path_utils::validate_path;
+use crate::tools::builtin::path_utils::{metadata_project_dir, validate_path};
 use crate::tools::tool::{
     ApprovalRequirement, Tool, ToolDomain, ToolError, ToolOutput, require_str,
 };
@@ -52,6 +52,12 @@ const MAX_WRITE_SIZE: usize = 5 * 1024 * 1024;
 
 /// Maximum directory listing entries.
 const MAX_DIR_ENTRIES: usize = 500;
+
+fn effective_base_dir(base_dir: Option<&Path>, ctx: &JobContext) -> Option<PathBuf> {
+    base_dir
+        .map(Path::to_path_buf)
+        .or_else(|| metadata_project_dir(&ctx.metadata))
+}
 
 /// Read file contents tool.
 #[derive(Debug, Default)]
@@ -106,7 +112,7 @@ impl Tool for ReadFileTool {
     async fn execute(
         &self,
         params: serde_json::Value,
-        _ctx: &JobContext,
+        ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let path_str = require_str(&params, "path")?;
 
@@ -115,7 +121,8 @@ impl Tool for ReadFileTool {
 
         let start = std::time::Instant::now();
 
-        let path = validate_path(path_str, self.base_dir.as_deref())?;
+        let base_dir = effective_base_dir(self.base_dir.as_deref(), ctx);
+        let path = validate_path(path_str, base_dir.as_deref())?;
 
         // Check file size
         let metadata = fs::metadata(&path)
@@ -228,7 +235,7 @@ impl Tool for WriteFileTool {
     async fn execute(
         &self,
         params: serde_json::Value,
-        _ctx: &JobContext,
+        ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let path_str = require_str(&params, "path")?;
 
@@ -254,7 +261,8 @@ impl Tool for WriteFileTool {
             )));
         }
 
-        let path = validate_path(path_str, self.base_dir.as_deref())?;
+        let base_dir = effective_base_dir(self.base_dir.as_deref(), ctx);
+        let path = validate_path(path_str, base_dir.as_deref())?;
 
         // Create parent directories
         if let Some(parent) = path.parent() {
@@ -346,7 +354,7 @@ impl Tool for ListDirTool {
     async fn execute(
         &self,
         params: serde_json::Value,
-        _ctx: &JobContext,
+        ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let path_str = params.get("path").and_then(|v| v.as_str()).unwrap_or(".");
 
@@ -362,7 +370,8 @@ impl Tool for ListDirTool {
 
         let start = std::time::Instant::now();
 
-        let path = validate_path(path_str, self.base_dir.as_deref())?;
+        let base_dir = effective_base_dir(self.base_dir.as_deref(), ctx);
+        let path = validate_path(path_str, base_dir.as_deref())?;
 
         let mut entries = Vec::new();
         list_dir_inner(&path, &path, recursive, max_depth, 0, &mut entries).await?;
@@ -544,7 +553,7 @@ impl Tool for ApplyPatchTool {
     async fn execute(
         &self,
         params: serde_json::Value,
-        _ctx: &JobContext,
+        ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let path_str = require_str(&params, "path")?;
 
@@ -559,7 +568,8 @@ impl Tool for ApplyPatchTool {
 
         let start = std::time::Instant::now();
 
-        let path = validate_path(path_str, self.base_dir.as_deref())?;
+        let base_dir = effective_base_dir(self.base_dir.as_deref(), ctx);
+        let path = validate_path(path_str, base_dir.as_deref())?;
 
         // Read current content
         let content = fs::read_to_string(&path)
@@ -721,6 +731,84 @@ mod tests {
             .unwrap();
 
         assert!(result.result.get("success").unwrap().as_bool().unwrap());
+        let content = std::fs::read_to_string(&file_path).unwrap();
+        assert!(content.contains("println!(\"new\")"));
+    }
+
+    #[tokio::test]
+    async fn test_read_file_uses_job_project_dir_metadata_for_relative_paths() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("nested.txt");
+        std::fs::write(&file_path, "hello from metadata\n").unwrap();
+
+        let tool = ReadFileTool::new();
+        let ctx = JobContext {
+            metadata: serde_json::json!({
+                "project_dir": dir.path().display().to_string()
+            }),
+            ..Default::default()
+        };
+
+        let result = tool
+            .execute(serde_json::json!({"path": "nested.txt"}), &ctx)
+            .await
+            .unwrap();
+
+        let content = result.result.get("content").unwrap().as_str().unwrap();
+        assert!(content.contains("hello from metadata"));
+    }
+
+    #[tokio::test]
+    async fn test_list_dir_uses_job_project_dir_metadata_for_relative_paths() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("file.txt"), "x").unwrap();
+
+        let tool = ListDirTool::new();
+        let ctx = JobContext {
+            metadata: serde_json::json!({
+                "project_dir": dir.path().display().to_string()
+            }),
+            ..Default::default()
+        };
+
+        let result = tool
+            .execute(serde_json::json!({"path": "."}), &ctx)
+            .await
+            .unwrap();
+
+        let entries = result.result.get("entries").unwrap().as_array().unwrap();
+        assert!(entries.iter().any(|entry| {
+            entry
+                .as_str()
+                .is_some_and(|value| value.starts_with("file.txt"))
+        }));
+    }
+
+    #[tokio::test]
+    async fn test_apply_patch_uses_job_project_dir_metadata_for_relative_paths() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("code.rs");
+        std::fs::write(&file_path, "fn main() {\n    println!(\"old\");\n}\n").unwrap();
+
+        let tool = ApplyPatchTool::new();
+        let ctx = JobContext {
+            metadata: serde_json::json!({
+                "project_dir": dir.path().display().to_string()
+            }),
+            ..Default::default()
+        };
+
+        tool.execute(
+            serde_json::json!({
+                "path": "code.rs",
+                "old_string": "println!(\"old\")",
+                "new_string": "println!(\"new\")"
+            }),
+            &ctx,
+        )
+        .await
+        .unwrap();
+
         let content = std::fs::read_to_string(&file_path).unwrap();
         assert!(content.contains("println!(\"new\")"));
     }
