@@ -71,6 +71,14 @@ Start with these deeper docs as needed:
 - Use MCP for external server integrations when the capability belongs outside the main binary.
 - Preserve extension lifecycle expectations: install, authenticate/configure, activate, remove.
 
+## Home Server Slack Policy
+
+- The Lenovo home server runs Slack in native Socket Mode, not the webhook/WASM Slack channel.
+- For live host debugging, verify `SLACK_APP_TOKEN` and `SLACK_BOT_TOKEN` are present and confirm logs contain `Slack Socket Mode channel started` and `Slack Socket Mode connected`.
+- Do not activate the `slack` WASM channel through auth mode on this host; that persists `activated_channels=["slack"]` and restores the webhook channel on restart.
+- Do not add `slack` to `~/.ironclaw/config.toml` `channels.wasm_channels` on this host.
+- If Slack stops responding, check for persisted `activated_channels` and webhook channel files before changing Slack app config.
+
 ## Docs, Parity, and Testing
 
 - If behavior changes, update the relevant docs/specs in the same branch.
